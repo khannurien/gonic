@@ -22,7 +22,7 @@ RUN apk add -U --no-cache \
     tini \
     shared-mime-info
 COPY --from=builder /out/* /usr/local/bin/
-VOLUME ["/cache", "/covers", "/data", "/music", "/podcasts"]
+VOLUME ["/cache", "/data", "/music", "/podcasts"]
 EXPOSE 80
 ENV TZ=
 ENV GONIC_DB_PATH=/data/gonic.db
@@ -31,6 +31,5 @@ ENV GONIC_MUSIC_PATH=/music
 ENV GONIC_PODCAST_PATH=/podcasts
 ENV GONIC_CACHE_PATH=/cache
 ENV GONIC_PLAYLISTS_PATH=/playlists
-ENV GONIC_COVERS_PATH=/covers
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["gonic"]
