@@ -8,24 +8,33 @@ on:
         description: 'Custom tag (optional, will use "nightly" if not provided)'
         required: false
         type: string
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 jobs:
   check-date:
-    runs-on: ubuntu-latest
     name: Check latest commit
+    runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
-      - uses: actions/checkout@v3
-      - id: check
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Check for commits in the last 24 hours
+        id: check
+        env:
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          test -n "$(git rev-list --after="24 hours" ${{ github.sha }})" \
-            && echo "should_run=true" >>$GITHUB_OUTPUT \
-            || echo "should_run=false" >>$GITHUB_OUTPUT
+          test -n "$(git rev-list --after='24 hours' "$COMMIT_SHA")" \
+            && echo "should_run=true" >>"$GITHUB_OUTPUT" \
+            || echo "should_run=false" >>"$GITHUB_OUTPUT"
   test:
     name: Lint and test
-    needs: check-date
-    if: ${{ needs.check-date.outputs.should_run == 'true' }}
     runs-on: ubuntu-latest
+    needs: [check-date]
+    if: ${{ needs.check-date.outputs.should_run == 'true' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,32 +51,38 @@ jobs:
         run: go test ./...
   build-docker:
     name: Build and release Docker image
+    runs-on: ubuntu-latest
     needs: [check-date, test]
     if: ${{ needs.check-date.outputs.should_run == 'true' }}
-    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v1
-        with:
-          install: true
-          version: latest
-          driver-opts: image=moby/buildkit:master
+        uses: docker/setup-buildx-action@v3
       - name: Login into DockerHub
-        run: echo ${{ secrets.DOCKERHUB_TOKEN }} | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login into GitHub Container Registry
-        run: echo ${{ secrets.CR_PAT }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate short hash and set tag
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          CUSTOM_TAG: ${{ inputs.custom_tag }}
         run: |
-          _short_hash=${{ github.sha }}
-          echo "SHORT_HASH=${_short_hash:0:7}" >> $GITHUB_ENV
-          if [ -n "${{ github.event.inputs.custom_tag }}" ]; then
-            echo "TAG_NAME=${{ github.event.inputs.custom_tag }}" >> $GITHUB_ENV
-          else
-            echo "TAG_NAME=nightly" >> $GITHUB_ENV
-          fi
-      - name: Build and Push
+          echo "SHORT_HASH=${COMMIT_SHA:0:7}" >>"$GITHUB_ENV"
+          echo "TAG_NAME=${CUSTOM_TAG:-nightly}" >>"$GITHUB_ENV"
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -79,3 +94,5 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ env.TAG_NAME }}
             ${{ github.repository }}:${{ env.SHORT_HASH }}
             ${{ github.repository }}:${{ env.TAG_NAME }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
