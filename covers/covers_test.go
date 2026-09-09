@@ -113,6 +113,9 @@ func TestPutDownscalesOversizedImages(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StoreDimension, cover.Width)
 	require.LessOrEqual(t, cover.Height, StoreDimension)
+	// the resize hands back an *image.NRGBA whatever went in, so an opaque photo must
+	// still come out as a jpeg rather than a lossless png
+	require.Equal(t, ExtJPG, cover.Ext)
 }
 
 func TestPutRejectsNonImages(t *testing.T) {

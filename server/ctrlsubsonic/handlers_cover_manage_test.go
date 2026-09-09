@@ -88,7 +88,9 @@ func TestCoverArtUploadOverridesAndClears(t *testing.T) {
 	before := decodeCoverArt(t, f, f.admin, albumID)
 	require.False(t, before.Overridden)
 
-	resp := uploadCover(t, f, f.admin, albumID, testPNG(t, 64, 64, color.RGBA{R: 0xff, A: 0xff}))
+	// translucent, so the store keeps it lossless and the format assertion below has
+	// something to check. an opaque upload is transcoded to jpeg whatever it arrived as
+	resp := uploadCover(t, f, f.admin, albumID, testPNG(t, 64, 64, color.NRGBA{R: 0xff, A: 0x80}))
 	require.Nil(t, resp.Error)
 	require.NotNil(t, resp.CoverArt)
 	require.True(t, resp.CoverArt.Overridden)

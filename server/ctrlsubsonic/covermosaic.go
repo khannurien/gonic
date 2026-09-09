@@ -23,6 +23,11 @@ const (
 	mosaicJPEGQuality = 90
 )
 
+// mosaicMaxPixels bounds one decoded tile. it's tighter than covers.MaxPixels because a
+// mosaic decodes up to mosaicMaxTiles images before composing, and every one of them ends
+// up scaled to at most half the canvas anyway.
+const mosaicMaxPixels = 16_000_000
+
 // coverForCollection builds a collection's cover from its albums' art.
 //
 // the layouts are spotify shaped rather than repeating a cover to fill the grid, which
@@ -39,6 +44,11 @@ func coverForCollection(dbc *db.DB, coverStore *covers.Store, tagReader tags.Rea
 		img, err := albumCoverImage(dbc, coverStore, tagReader, albumID)
 		if err != nil {
 			continue // an album with no art, or art we can't decode, just doesn't count
+		}
+		// shrink now rather than at compose time: a tile is never used above canvas
+		// size, and this bounds what's held while the rest of the tiles are read
+		if b := img.Bounds(); b.Dx() > mosaicSize || b.Dy() > mosaicSize {
+			img = imaging.Fit(img, mosaicSize, mosaicSize, imaging.Lanczos)
 		}
 		images = append(images, img)
 		if len(images) == mosaicMaxTiles {
@@ -83,7 +93,25 @@ func albumCoverImage(dbc *db.DB, coverStore *covers.Store, tagReader tags.Reader
 	}
 	defer body.Close()
 
-	img, _, err := image.Decode(body)
+	// unlike covers.Put, the bytes here come off disk or out of a tag rather than through
+	// the store, so nothing has checked them yet. read and preflight before Decode
+	// allocates: a small file can declare enormous dimensions
+	raw, err := io.ReadAll(io.LimitReader(body, covers.MaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read album cover: %w", err)
+	}
+	if len(raw) > covers.MaxBytes {
+		return nil, fmt.Errorf("album cover over %d bytes", covers.MaxBytes)
+	}
+	conf, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("decode album cover config: %w", err)
+	}
+	if conf.Width > covers.MaxDimension || conf.Height > covers.MaxDimension || conf.Width*conf.Height > mosaicMaxPixels {
+		return nil, fmt.Errorf("album cover too large: %dx%d", conf.Width, conf.Height)
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("decode album cover: %w", err)
 	}

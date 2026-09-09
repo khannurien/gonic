@@ -216,3 +216,66 @@ func TestCollectionSurvivesAlbumRowRecreation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []int{recreated.ID, f.albumAA.ID}, after, "healed, and still in order")
 }
+
+// an empty albumId is how a client says "no albums". without it a collection could be
+// reordered and added to but never emptied.
+func TestUpdateCollectionEmptiesAlbums(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	id := f.collectionShared.SID().String()
+	out := f.query(t, f.contr.ServeUpdateCollection, f.admin,
+		url.Values{"id": {id}, "albumId": {""}})
+	require.NotContains(t, out, `"error"`)
+
+	albumIDs, err := collection.AlbumIDs(f.dbc, f.collectionShared.ID)
+	require.NoError(t, err)
+	require.Empty(t, albumIDs)
+
+	// an absent albumId still leaves the list alone
+	require.NoError(t, collection.SetAlbums(f.dbc, f.collectionShared.ID, []int{f.albumAA.ID}))
+	out = f.query(t, f.contr.ServeUpdateCollection, f.admin,
+		url.Values{"id": {id}, "name": {"renamed"}})
+	require.NotContains(t, out, `"error"`)
+
+	albumIDs, err = collection.AlbumIDs(f.dbc, f.collectionShared.ID)
+	require.NoError(t, err)
+	require.Equal(t, []int{f.albumAA.ID}, albumIDs)
+}
+
+func TestCreateCollectionRejectsBadAlbumIDs(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	var before int
+	require.NoError(t, f.dbc.Model(db.Collection{}).Count(&before).Error)
+
+	out := f.query(t, f.contr.ServeCreateCollection, f.admin,
+		url.Values{"name": {"doomed"}, "albumId": {"tr-1"}})
+	require.Contains(t, out, "please provide valid album ids")
+
+	// and the failed call left nothing behind
+	var after int
+	require.NoError(t, f.dbc.Model(db.Collection{}).Count(&after).Error)
+	require.Equal(t, before, after)
+}
+
+// getPlaylist takes either `id` or `playlistId`, and the collection mirror has to honour
+// both the same way the m3u path does
+func TestCollectionMirrorAcceptsPlaylistIDParam(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	out := f.query(t, f.contr.ServeGetPlaylist, f.admin,
+		url.Values{"playlistId": {f.collectionShared.SID().String()}})
+	require.NotContains(t, out, `"error"`)
+
+	var got struct {
+		Response struct {
+			Playlist *spec.Playlist `json:"playlist"`
+		} `json:"subsonic-response"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.NotNil(t, got.Response.Playlist)
+	require.Equal(t, "shared collection", got.Response.Playlist.Name)
+}

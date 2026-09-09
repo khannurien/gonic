@@ -140,7 +140,8 @@ func (c *Controller) ServeGetPlaylist(r *http.Request) *spec.Response {
 		return spec.NewError(10, "please provide an `id` parameter")
 	}
 	if playlistID.Type == specid.Collection {
-		coll, resp := c.collectionForRead(r)
+		// by id, not by re-reading `id`: this handler also accepts `playlistId`
+		coll, resp := c.collectionForReadID(r, playlistID)
 		if resp != nil {
 			return resp
 		}

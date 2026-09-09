@@ -11,7 +11,8 @@ import (
 
 // DirCache is an LRU file cache backed by a directory. Callers that write new
 // files must hold an RLock for the duration of the write so that Eject cannot
-// delete a file that is still being written.
+// delete a file that is still being written. Callers that invalidate entries must
+// hold the write lock, so that a concurrent read can't put back what they removed.
 type DirCache struct {
 	path    string
 	limitMB int
@@ -26,6 +27,13 @@ func (c *DirCache) Path() string { return c.path }
 
 func (c *DirCache) RLock()   { c.mu.RLock() }
 func (c *DirCache) RUnlock() { c.mu.RUnlock() }
+
+// Lock and Unlock take the write lock, for a caller that removes files. it has to exclude
+// readers, not just Eject: a reader holds an RLock across the whole miss-compute-write
+// sequence, so a removal that only took an RLock could be overtaken by a reader writing
+// bytes it had already read.
+func (c *DirCache) Lock()   { c.mu.Lock() }
+func (c *DirCache) Unlock() { c.mu.Unlock() }
 
 // Eject removes the least-recently-used files until the cache is within its
 // size limit. It holds a write lock for its duration, blocking concurrent

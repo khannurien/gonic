@@ -1,8 +1,13 @@
 package ctrlsubsonic
 
 import (
+	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/color"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -90,4 +95,35 @@ func TestCollectionMosaicSkipsAlbumsWithoutArt(t *testing.T) {
 	cfg, _, err := image.DecodeConfig(body)
 	require.NoError(t, err)
 	require.Equal(t, 200, cfg.Width)
+}
+
+// pngHeader builds a png that declares w by h but carries no image data. real decompression
+// bombs are small files with large headers, and this is the cheap way to make one.
+func pngHeader(w, h int) []byte {
+	var ihdr bytes.Buffer
+	ihdr.WriteString("IHDR")
+	_ = binary.Write(&ihdr, binary.BigEndian, uint32(w))
+	_ = binary.Write(&ihdr, binary.BigEndian, uint32(h))
+	ihdr.Write([]byte{8, 6, 0, 0, 0}) // 8 bit truecolor with alpha, no interlace
+
+	var out bytes.Buffer
+	out.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	_ = binary.Write(&out, binary.BigEndian, uint32(ihdr.Len()-4))
+	out.Write(ihdr.Bytes())
+	_ = binary.Write(&out, binary.BigEndian, crc32.ChecksumIEEE(ihdr.Bytes()))
+	return out.Bytes()
+}
+
+// a mosaic tile is read straight off disk, so nothing has checked it the way covers.Put
+// checks an upload. it has to do its own preflight before Decode allocates.
+func TestCollectionMosaicRejectsOversizedTile(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	path := filepath.Join(f.albumAB.RootDir, f.albumAB.LeftPath, f.albumAB.RightPath, f.albumAB.Cover)
+	require.NotEmpty(t, f.albumAB.Cover)
+	require.NoError(t, os.WriteFile(path, pngHeader(6000, 6000), 0o600))
+
+	_, err := albumCoverImage(f.dbc, f.contr.coverStore, f.contr.tagReader, f.albumAB.ID)
+	require.ErrorContains(t, err, "too large", "must be refused on the header, not after decoding")
 }

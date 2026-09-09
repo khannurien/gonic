@@ -554,12 +554,17 @@ func (zeroReader) Read(p []byte) (int, error) {
 
 // purgeCachedCovers drops every cached size and format for the given ids. call it whenever
 // the bytes behind an id change, otherwise getCoverArt keeps serving the old resize.
+//
+// it takes the write lock: ServeGetCoverArt holds an RLock from the cache miss through to
+// saving the resize, so a purge that shared that lock could run in the middle and have the
+// old image written back on top of it afterwards. waiting for in flight reads to finish
+// means anything they wrote is removed here.
 func purgeCachedCovers(coverCache *cache.DirCache, ids ...specid.ID) error {
 	if coverCache == nil || len(ids) == 0 {
 		return nil
 	}
-	coverCache.RLock()
-	defer coverCache.RUnlock()
+	coverCache.Lock()
+	defer coverCache.Unlock()
 
 	entries, err := os.ReadDir(coverCache.Path())
 	if os.IsNotExist(err) {

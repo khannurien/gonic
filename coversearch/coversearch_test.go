@@ -187,3 +187,72 @@ func TestSearchHonoursContextDeadline(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, results)
 }
+
+// a typed query is how an admin says the album's tags are wrong. the archive arm must not
+// keep answering from the mbid those tags carry.
+func TestSearchTextOverridesTaggedMBID(t *testing.T) {
+	t.Parallel()
+
+	var caaPaths []string
+	caaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		caaPaths = append(caaPaths, r.URL.Path)
+		_, _ = w.Write([]byte(caaReleaseJSON))
+	}))
+	t.Cleanup(caaServer.Close)
+
+	var mbQuery string
+	mbServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mbQuery = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"releases":[{"id":"searched-mbid","title":"Kid A",` +
+			`"artist-credit":[{"name":"Radiohead"}]}]}`))
+	}))
+	t.Cleanup(mbServer.Close)
+
+	caa := coverartarchive.NewClient("gonic-test")
+	caa.BaseURL = caaServer.URL + "/"
+	caa.Limiter = noLimit()
+
+	mb := musicbrainz.NewClient("gonic-test")
+	mb.BaseURL = mbServer.URL + "/"
+	mb.Limiter = noLimit()
+
+	s := &Searcher{CoverArtArchive: caa, MusicBrainz: mb}
+	results, err := s.Search(context.Background(), Query{
+		Artist: "Wrong Artist", Album: "Wrong Album", MusicBrainzID: "tagged-mbid", Text: "radiohead kid a",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+
+	require.Equal(t, "radiohead kid a", mbQuery, "the typed text must reach musicbrainz verbatim")
+	require.Equal(t, []string{"/release/searched-mbid"}, caaPaths, "the tagged mbid must not be used")
+
+	// and the results are labelled with what was found, not with the album's own tags
+	require.Equal(t, "Kid A", results[0].Title)
+	require.Equal(t, "Radiohead", results[0].Artist)
+}
+
+// with no text typed, the tagged mbid is still the best answer
+func TestSearchUsesTaggedMBIDWithoutText(t *testing.T) {
+	t.Parallel()
+
+	var caaPaths []string
+	caaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		caaPaths = append(caaPaths, r.URL.Path)
+		_, _ = w.Write([]byte(caaReleaseJSON))
+	}))
+	t.Cleanup(caaServer.Close)
+
+	caa := coverartarchive.NewClient("gonic-test")
+	caa.BaseURL = caaServer.URL + "/"
+	caa.Limiter = noLimit()
+
+	s := &Searcher{CoverArtArchive: caa}
+	results, err := s.Search(context.Background(), Query{
+		Artist: "Radiohead", Album: "OK Computer", MusicBrainzID: "tagged-mbid",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.Equal(t, []string{"/release/tagged-mbid"}, caaPaths)
+	require.Equal(t, "OK Computer", results[0].Title)
+	require.Equal(t, "Radiohead", results[0].Artist)
+}

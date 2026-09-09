@@ -73,6 +73,13 @@ func (c *Controller) ServeCreateCollection(r *http.Request) *spec.Response {
 		return spec.NewError(10, "please provide a `name` parameter")
 	}
 
+	// parse before anything is written, otherwise a bad albumId leaves an empty
+	// collection behind for a call the client saw fail
+	albumIDs, err := collectionAlbumIDs(p, "albumId")
+	if err != nil {
+		return spec.NewError(10, "please provide valid album ids: %v", err)
+	}
+
 	now := time.Now()
 	coll := db.Collection{
 		UserID:    user.ID,
@@ -82,16 +89,14 @@ func (c *Controller) ServeCreateCollection(r *http.Request) *spec.Response {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if err := c.dbc.Save(&coll).Error; err != nil {
-		return spec.NewError(0, "create collection: %v", err)
-	}
-
-	albumIDs, err := collectionAlbumIDs(p, "albumId")
+	err = c.dbc.Transaction(func(tx *db.DB) error {
+		if err := tx.Save(&coll).Error; err != nil {
+			return fmt.Errorf("save collection: %w", err)
+		}
+		return collection.SetAlbums(tx, coll.ID, albumIDs)
+	})
 	if err != nil {
-		return spec.NewError(10, "please provide valid album ids: %v", err)
-	}
-	if err := collection.SetAlbums(c.dbc, coll.ID, albumIDs); err != nil {
-		return spec.NewError(0, "set collection albums: %v", err)
+		return spec.NewError(0, "create collection: %v", err)
 	}
 
 	rendered, err := c.collectionRender(&coll, false)
@@ -159,13 +164,20 @@ func (c *Controller) ServeDeleteCollection(r *http.Request) *spec.Response {
 }
 
 func (c *Controller) collectionForRead(r *http.Request) (*db.Collection, *spec.Response) {
-	user := r.Context().Value(CtxUser).(*db.User)
 	p := r.Context().Value(CtxParams).(params.Params)
 
 	id, err := p.GetID("id")
 	if err != nil {
 		return nil, spec.NewError(10, "please provide an `id` parameter")
 	}
+	return c.collectionForReadID(r, id)
+}
+
+// collectionForReadID is collectionForRead for a caller that already resolved the id from
+// somewhere other than `id`, eg. getPlaylist's `playlistId`.
+func (c *Controller) collectionForReadID(r *http.Request, id specid.ID) (*db.Collection, *spec.Response) {
+	user := r.Context().Value(CtxUser).(*db.User)
+
 	coll, err := c.collectionByID(id)
 	if err != nil {
 		return nil, spec.NewError(70, "collection with id %q not found", id.String())
@@ -284,13 +296,23 @@ func (c *Controller) collectionAttachContents(ret *spec.Collection, coll *db.Col
 	return nil
 }
 
+// collectionAlbumIDs parses the repeated albumId param. values are read as strings rather
+// than through GetIDList so that an explicitly empty one can mean "no albums", which is the
+// only way a client has to empty a collection.
 func collectionAlbumIDs(p params.Params, key string) ([]int, error) {
-	ids, err := p.GetIDList(key)
+	values, err := p.GetList(key)
 	if err != nil && !errors.Is(err, params.ErrNoValues) {
 		return nil, err
 	}
-	out := make([]int, 0, len(ids))
-	for _, id := range ids {
+	out := make([]int, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		id, err := specid.New(value)
+		if err != nil {
+			return nil, fmt.Errorf("parse album id %q: %w", value, err)
+		}
 		if id.Type != specid.Album {
 			return nil, fmt.Errorf("not an album id: %q", id.String())
 		}

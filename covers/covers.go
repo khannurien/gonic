@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/color"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -237,10 +236,20 @@ func (s *Store) Walk(fn func(hash, ext string, info os.FileInfo) error) error {
 	return nil
 }
 
+// hasAlpha reports whether the image actually needs a lossless container. it looks at the
+// pixels rather than the colour model: imaging.Fit always hands back an *image.NRGBA, so a
+// model check would call every downscaled photo transparent and store it as a large png.
 func hasAlpha(img image.Image) bool {
-	switch img.ColorModel() {
-	case color.NRGBAModel, color.RGBAModel, color.NRGBA64Model, color.RGBA64Model, color.AlphaModel, color.Alpha16Model:
-		return true
+	if o, ok := img.(interface{ Opaque() bool }); ok {
+		return !o.Opaque()
+	}
+	bounds := img.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if _, _, _, a := img.At(x, y).RGBA(); a != 0xffff {
+				return true
+			}
+		}
 	}
 	return false
 }

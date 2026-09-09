@@ -138,21 +138,30 @@ func (s *Searcher) Search(ctx context.Context, q Query) ([]Result, error) {
 	return results, nil
 }
 
+// caaCandidate is an archive release plus the labels to hang on its images. the archive
+// itself only returns images, so the title and artist come from whatever resolved the
+// release: the album's own tags for a tagged mbid, the musicbrainz hit for a text search.
+type caaCandidate struct {
+	release *coverartarchive.Release
+	title   string
+	artist  string
+}
+
 func (s *Searcher) searchCoverArtArchive(ctx context.Context, q Query) ([]Result, error) {
-	releases, err := s.coverArtArchiveReleases(ctx, q)
+	candidates, err := s.coverArtArchiveReleases(ctx, q)
 	if err != nil {
 		return nil, err
 	}
 
 	var results []Result
-	for _, release := range releases {
-		for _, image := range release.Front() {
+	for _, candidate := range candidates {
+		for _, image := range candidate.release.Front() {
 			results = append(results, Result{
 				Source:       SourceCoverArtArchive,
 				URL:          image.Image,
 				ThumbnailURL: image.Thumbnail(),
-				Title:        q.Album,
-				Artist:       q.Artist,
+				Title:        candidate.title,
+				Artist:       candidate.artist,
 			})
 			if len(results) >= q.limit() {
 				return results, nil
@@ -164,9 +173,21 @@ func (s *Searcher) searchCoverArtArchive(ctx context.Context, q Query) ([]Result
 
 // coverArtArchiveReleases resolves a query to archive releases: straight to the mbid when
 // the album is tagged with one, then its release group, then a musicbrainz search.
-func (s *Searcher) coverArtArchiveReleases(ctx context.Context, q Query) ([]*coverartarchive.Release, error) {
-	if q.MusicBrainzID != "" {
-		return s.coverArtArchiveByMBID(ctx, q.MusicBrainzID)
+//
+// Text skips the mbid shortcut, the same way it overrides Artist/Album for the other
+// sources. typing a query is how an admin says the tags are wrong, so honouring the mbid
+// there would keep handing back art for the release they're trying to get away from.
+func (s *Searcher) coverArtArchiveReleases(ctx context.Context, q Query) ([]caaCandidate, error) {
+	if q.MusicBrainzID != "" && q.Text == "" {
+		releases, err := s.coverArtArchiveByMBID(ctx, q.MusicBrainzID)
+		if err != nil {
+			return nil, err
+		}
+		candidates := make([]caaCandidate, 0, len(releases))
+		for _, release := range releases {
+			candidates = append(candidates, caaCandidate{release: release, title: q.Album, artist: q.Artist})
+		}
+		return candidates, nil
 	}
 
 	if s.MusicBrainz == nil {
@@ -178,18 +199,32 @@ func (s *Searcher) coverArtArchiveReleases(ctx context.Context, q Query) ([]*cov
 		return nil, fmt.Errorf("search releases: %w", err)
 	}
 
-	var releases []*coverartarchive.Release
+	var candidates []caaCandidate
 	for _, mbRelease := range found {
 		release, err := s.CoverArtArchive.GetRelease(ctx, mbRelease.ID)
 		if errors.Is(err, coverartarchive.ErrNotFound) {
 			continue
 		}
 		if err != nil {
-			return releases, err
+			return candidates, err
 		}
-		releases = append(releases, release)
+		candidates = append(candidates, caaCandidate{
+			release: release,
+			title:   mbRelease.Title,
+			artist:  artistCreditName(mbRelease.ArtistCredit),
+		})
 	}
-	return releases, nil
+	return candidates, nil
+}
+
+func artistCreditName(credits []musicbrainz.ArtistCredit) string {
+	var parts []string
+	for _, credit := range credits {
+		if credit.Name != "" {
+			parts = append(parts, credit.Name)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // coverArtArchiveByMBID goes straight at the tagged release, then falls back to the
@@ -222,6 +257,11 @@ func (s *Searcher) coverArtArchiveByMBID(ctx context.Context, mbid string) ([]*c
 }
 
 func musicBrainzQuery(q Query) string {
+	// Text is the user's own words, so it replaces the album's tags rather than being
+	// used only when there are none
+	if q.Text != "" {
+		return q.Text
+	}
 	if q.Album == "" && q.Artist == "" {
 		return q.text()
 	}
