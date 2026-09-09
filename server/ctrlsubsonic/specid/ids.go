@@ -28,6 +28,7 @@ const (
 	PodcastEpisode       IDT = "pe"
 	InternetRadioStation IDT = "ir"
 	Playlist             IDT = "pl"
+	Collection           IDT = "co"
 	separator                = "-"
 )
 
@@ -67,6 +68,8 @@ func New(in string) (ID, error) {
 		return ID{Type: PodcastEpisode, Value: val}, nil
 	case InternetRadioStation:
 		return ID{Type: InternetRadioStation, Value: val}, nil
+	case Collection:
+		return ID{Type: Collection, Value: val}, nil
 	default:
 		return ID{}, fmt.Errorf("%q: %w", partType, ErrBadPrefix)
 	}

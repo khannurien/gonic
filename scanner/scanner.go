@@ -43,6 +43,11 @@ type Scanner struct {
 	scanEmbeddedCover  bool
 	genreTree          map[string][]string
 	scanning           *int32
+
+	// OnComplete runs after a successful scan. it's how the subsonic controller drops
+	// cached collection mosaics: a scan can change a member album's art with no endpoint
+	// involved, leaving the composed image stale
+	OnComplete func()
 }
 
 func New(musicDirs []string, db *db.DB, multiValueSettings map[*tags.Spec]tags.MultiValueSetting, tagReader tags.Reader, excludePattern string, scanEmbeddedCover bool, genreTree map[string][]string) *Scanner {
@@ -116,6 +121,19 @@ func (s *Scanner) ScanAndClean(opts ScanOptions) (*State, error) {
 	}
 	if err := s.cleanBookmarks(st); err != nil {
 		return nil, fmt.Errorf("clean bookmarks: %w", err)
+	}
+
+	// cleanAlbums hard deletes album rows, so anything that referenced one by id is now
+	// orphaned. re-resolve those by the path snapshot they kept
+	if _, err := s.db.HealAlbumCoverOverrides(); err != nil {
+		return nil, fmt.Errorf("heal album cover overrides: %w", err)
+	}
+	if _, err := s.db.HealCollectionAlbums(); err != nil {
+		return nil, fmt.Errorf("heal collection albums: %w", err)
+	}
+
+	if s.OnComplete != nil {
+		s.OnComplete()
 	}
 
 	if err := s.db.SetSetting(db.LastScanTime, strconv.FormatInt(time.Now().Unix(), 10)); err != nil {

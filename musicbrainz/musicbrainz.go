@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +58,40 @@ func (c *Client) GetRelease(ctx context.Context, mbid string, inc ...string) (*R
 		return nil, err
 	}
 	return &r, nil
+}
+
+// SearchReleases runs a lucene query against the release index, e.g.
+// `release:"OK Computer" AND artist:"Radiohead"`.
+func (c *Client) SearchReleases(ctx context.Context, query string, limit int) ([]Release, error) {
+	var rs ReleaseSearch
+	if err := c.search(ctx, "release", query, limit, &rs); err != nil {
+		return nil, err
+	}
+	return rs.Releases, nil
+}
+
+func (c *Client) search(ctx context.Context, entity, query string, limit int, dest any) error {
+	q := url.Values{}
+	q.Set("fmt", "json")
+	q.Set("query", query)
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+
+	u, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return fmt.Errorf("parse base url: %w", err)
+	}
+	u = u.JoinPath(entity)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("User-Agent", c.UserAgent)
+
+	return c.do(req, dest)
 }
 
 func (c *Client) get(ctx context.Context, entity, mbid string, inc []string, dest any) error {
@@ -118,10 +153,20 @@ type Artist struct {
 }
 
 type Release struct {
-	ID             string        `json:"id"`
-	Title          string        `json:"title"`
-	Disambiguation string        `json:"disambiguation"`
-	ReleaseGroup   *ReleaseGroup `json:"release-group"`
+	ID             string         `json:"id"`
+	Title          string         `json:"title"`
+	Disambiguation string         `json:"disambiguation"`
+	ReleaseGroup   *ReleaseGroup  `json:"release-group"`
+	ArtistCredit   []ArtistCredit `json:"artist-credit"`
+}
+
+type ArtistCredit struct {
+	Name   string  `json:"name"`
+	Artist *Artist `json:"artist"`
+}
+
+type ReleaseSearch struct {
+	Releases []Release `json:"releases"`
 }
 
 type ReleaseGroup struct {

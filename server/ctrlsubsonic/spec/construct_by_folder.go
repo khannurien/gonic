@@ -60,11 +60,7 @@ func NewAlbumByFolder(f *AlbumRow) *Album {
 	if f.AlbumRating != nil {
 		a.UserRating = f.AlbumRating.Rating
 	}
-	if f.Cover != "" {
-		a.CoverID = f.SID()
-	} else if f.EmbeddedCoverTrackID != nil {
-		a.CoverID = f.EmbeddedCoverTrackSID()
-	}
+	a.CoverID = f.CoverSID()
 	return a
 }
 
@@ -90,11 +86,7 @@ func NewTCAlbumByFolder(f *AlbumRow) *TrackChild {
 	if f.AlbumRating != nil {
 		trCh.UserRating = f.AlbumRating.Rating
 	}
-	if f.Cover != "" {
-		trCh.CoverID = f.SID()
-	} else if f.EmbeddedCoverTrackID != nil {
-		trCh.CoverID = f.EmbeddedCoverTrackSID()
-	}
+	trCh.CoverID = f.CoverSID()
 
 	return trCh
 }
@@ -135,13 +127,10 @@ func NewTCTrackByFolder(t *TrackRow, parent *db.Album) *TrackChild {
 		trCh.Title = t.Filename
 	}
 
-	switch {
-	case t.HasEmbeddedCover:
+	if t.HasEmbeddedCover {
 		trCh.CoverID = t.SID()
-	case parent.Cover != "":
-		trCh.CoverID = parent.SID()
-	case parent.EmbeddedCoverTrackID != nil:
-		trCh.CoverID = parent.EmbeddedCoverTrackSID()
+	} else {
+		trCh.CoverID = parent.CoverSID()
 	}
 
 	if t.Album != nil {
@@ -240,11 +229,7 @@ func NewArtistByFolder(f *AlbumRow) *Artist {
 	if f.AlbumRating != nil {
 		a.UserRating = f.AlbumRating.Rating
 	}
-	if f.Cover != "" {
-		a.CoverID = f.SID()
-	} else if f.EmbeddedCoverTrackID != nil {
-		a.CoverID = f.EmbeddedCoverTrackSID()
-	}
+	a.CoverID = f.CoverSID()
 	return a
 }
 

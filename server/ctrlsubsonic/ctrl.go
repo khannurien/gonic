@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"go.senan.xyz/gonic/cache"
+	"go.senan.xyz/gonic/covers"
+	"go.senan.xyz/gonic/coversearch"
 	"go.senan.xyz/gonic/db"
 	"go.senan.xyz/gonic/handlerutil"
 	"go.senan.xyz/gonic/infocache/albuminfocache"
@@ -54,26 +56,30 @@ type ProxyPathResolver func(in string) string
 type Controller struct {
 	*http.ServeMux
 
-	dbc             *db.DB
-	scanner         *scanner.Scanner
-	musicPaths      []MusicPath
-	podcastsPath    string
-	cacheAudioPath  string
-	coverCache      *cache.DirCache
-	jukebox         *jukebox.Jukebox
-	playlistStore   *playlist.Store
-	scrobblers      []scrobble.Scrobbler
-	podcasts        *podcast.Podcasts
-	transcoder      transcode.Transcoder
-	lastFMClient    *lastfm.Client
-	artistInfoCache *artistinfocache.ArtistInfoCache
-	albumInfoCache  *albuminfocache.AlbumInfoCache
-	tagReader       tags.Reader
+	dbc            *db.DB
+	scanner        *scanner.Scanner
+	musicPaths     []MusicPath
+	podcastsPath   string
+	cacheAudioPath string
+	coverCache     *cache.DirCache
+	jukebox        *jukebox.Jukebox
+	playlistStore  *playlist.Store
+	coverStore     *covers.Store
+	coverSearcher  *coversearch.Searcher
+	// coverFetchClient is nil outside tests, see httpClientForCoverFetch
+	coverFetchClient *http.Client
+	scrobblers       []scrobble.Scrobbler
+	podcasts         *podcast.Podcasts
+	transcoder       transcode.Transcoder
+	lastFMClient     *lastfm.Client
+	artistInfoCache  *artistinfocache.ArtistInfoCache
+	albumInfoCache   *albuminfocache.AlbumInfoCache
+	tagReader        tags.Reader
 
 	resolveProxyPath ProxyPathResolver
 }
 
-func New(dbc *db.DB, scannr *scanner.Scanner, musicPaths []MusicPath, podcastsPath string, cacheAudioPath string, coverCache *cache.DirCache, jukebox *jukebox.Jukebox, playlistStore *playlist.Store, scrobblers []scrobble.Scrobbler, podcasts *podcast.Podcasts, transcoder transcode.Transcoder, lastFMClient *lastfm.Client, artistInfoCache *artistinfocache.ArtistInfoCache, albumInfoCache *albuminfocache.AlbumInfoCache, tagReader tags.Reader, resolveProxyPath ProxyPathResolver) (*Controller, error) {
+func New(dbc *db.DB, scannr *scanner.Scanner, musicPaths []MusicPath, podcastsPath string, cacheAudioPath string, coverCache *cache.DirCache, jukebox *jukebox.Jukebox, playlistStore *playlist.Store, coverStore *covers.Store, coverSearcher *coversearch.Searcher, scrobblers []scrobble.Scrobbler, podcasts *podcast.Podcasts, transcoder transcode.Transcoder, lastFMClient *lastfm.Client, artistInfoCache *artistinfocache.ArtistInfoCache, albumInfoCache *albuminfocache.AlbumInfoCache, tagReader tags.Reader, resolveProxyPath ProxyPathResolver) (*Controller, error) {
 	c := Controller{
 		ServeMux: http.NewServeMux(),
 
@@ -85,6 +91,8 @@ func New(dbc *db.DB, scannr *scanner.Scanner, musicPaths []MusicPath, podcastsPa
 		coverCache:      coverCache,
 		jukebox:         jukebox,
 		playlistStore:   playlistStore,
+		coverStore:      coverStore,
+		coverSearcher:   coverSearcher,
 		scrobblers:      scrobblers,
 		podcasts:        podcasts,
 		transcoder:      transcoder,
@@ -138,6 +146,22 @@ func New(dbc *db.DB, scannr *scanner.Scanner, musicPaths []MusicPath, podcastsPa
 
 	// raw
 	c.Handle("/getCoverArt", chainRaw(respRaw(c.ServeGetCoverArt)))
+
+	// cover art management, a gonic extension. the slow chain matters: searchCoverArt and
+	// setCoverArt do remote i/o and uploadCoverArt reads a file body, all of which the
+	// server's 5s read/write timeouts would otherwise cut off
+	c.Handle("/getCoverArtInfo", chain(resp(c.ServeGetCoverArtInfo)))
+	c.Handle("/searchCoverArt", chainRaw(resp(c.ServeSearchCoverArt)))
+	c.Handle("/setCoverArt", chainRaw(resp(c.ServeSetCoverArt)))
+	c.Handle("/uploadCoverArt", chainRaw(respRaw(c.ServeUploadCoverArt)))
+	c.Handle("/deleteCoverArt", chain(resp(c.ServeDeleteCoverArt)))
+
+	// collections, a gonic extension
+	c.Handle("/getCollections", chain(resp(c.ServeGetCollections)))
+	c.Handle("/getCollection", chain(resp(c.ServeGetCollection)))
+	c.Handle("/createCollection", chain(resp(c.ServeCreateCollection)))
+	c.Handle("/updateCollection", chain(resp(c.ServeUpdateCollection)))
+	c.Handle("/deleteCollection", chain(resp(c.ServeDeleteCollection)))
 	c.Handle("/stream", chainRaw(respRaw(c.ServeStream)))
 	c.Handle("/download", chainRaw(respRaw(c.ServeStream)))
 	c.Handle("/getAvatar", chainRaw(respRaw(c.ServeGetAvatar)))

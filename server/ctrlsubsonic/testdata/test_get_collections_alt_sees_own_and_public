@@ -5,29 +5,32 @@
     "type": "gonic",
     "serverVersion": "",
     "openSubsonic": true,
-    "playlists": {
-      "playlist": [
+    "collections": {
+      "collection": [
         {
-          "id": "pl-MS9zaGFyZWQubTN1",
-          "name": "shared playlist",
-          "comment": "for testing",
-          "owner": "admin",
-          "songCount": 2,
+          "id": "co-2",
+          "name": "private collection",
+          "comment": "",
+          "owner": "alt",
+          "public": false,
+          "albumCount": 1,
+          "songCount": 1,
+          "duration": 100,
           "created": "2020-05-01T12:00:00Z",
           "changed": "2020-05-01T12:00:00Z",
-          "duration": 0,
-          "public": true
+          "coverArt": "co-2"
         },
         {
           "id": "co-1",
           "name": "shared collection",
           "comment": "for testing",
           "owner": "admin",
+          "public": true,
+          "albumCount": 2,
           "songCount": 5,
+          "duration": 500,
           "created": "2020-05-01T12:00:00Z",
           "changed": "2020-05-01T12:00:00Z",
-          "duration": 500,
-          "public": true,
           "coverArt": "co-1"
         }
       ]

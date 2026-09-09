@@ -52,10 +52,10 @@ const artistRolesColumn = `(
 const artistCoverAlbumIDColumn = `coalesce(
 	(SELECT albums.id FROM albums
 		JOIN album_credits ON album_credits.album_id=albums.id
-		WHERE album_credits.artist_id=artists.id AND album_credits.role='albumartist' AND albums.cover<>''
+		WHERE album_credits.artist_id=artists.id AND album_credits.role='albumartist' AND (albums.cover<>'' OR coalesce(albums.cover_override_hash,'')<>'')
 		ORDER BY albums.tag_year DESC, albums.id
 		LIMIT 1),
-	(SELECT albums.id FROM albums WHERE albums.cover<>'' AND albums.id IN (
+	(SELECT albums.id FROM albums WHERE (albums.cover<>'' OR coalesce(albums.cover_override_hash,'')<>'') AND albums.id IN (
 		SELECT album_id FROM album_credits WHERE artist_id=artists.id
 		UNION
 		SELECT tracks.album_id FROM track_credits
@@ -179,6 +179,22 @@ func TrackWithUserData(userID int) func(*gorm.DB) *gorm.DB {
 		return q.
 			Preload("TrackStar", "user_id=?", userID).
 			Preload("TrackRating", "user_id=?", userID)
+	}
+}
+
+// Collection
+
+// CollectionTracks expands a collection to its tracks, ordered by the collection's own
+// album order then disc and track number. the coalesces matter: disc/track number default
+// to null, and the filename tiebreak keeps the order stable for identical tags.
+//
+// entries whose album row is gone drop out of the join on their own.
+func CollectionTracks(collectionID int) func(*gorm.DB) *gorm.DB {
+	return func(q *gorm.DB) *gorm.DB {
+		return q.
+			Joins("JOIN collection_albums ca ON ca.album_id=tracks.album_id").
+			Where("ca.collection_id=?", collectionID).
+			Order("ca.position, coalesce(tracks.tag_disc_number,0), coalesce(tracks.tag_track_number,0), tracks.filename")
 	}
 }
 

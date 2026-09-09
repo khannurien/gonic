@@ -25,6 +25,9 @@ import (
 	_ "go.senan.xyz/gonic/deps"
 
 	"go.senan.xyz/gonic"
+	"go.senan.xyz/gonic/cache"
+	"go.senan.xyz/gonic/collection"
+	"go.senan.xyz/gonic/covers"
 	"go.senan.xyz/gonic/db"
 	"go.senan.xyz/gonic/infocache/albuminfocache"
 	"go.senan.xyz/gonic/infocache/artistinfocache"
@@ -110,15 +113,18 @@ type fixture struct {
 	artistC db.Artist // unicode name
 	artistX db.Artist // only ever a track artist
 
-	albumAA     db.Album
-	albumAB     db.Album
-	albumBA     db.Album
-	albumCollab db.Album
-	albumSplit  db.Album // multi album-artists, no credit-as
-	albumCa     db.Album
-	albumCross  db.Album
-	albumVA     db.Album
-	albumEmpty  db.Album
+	albumAA db.Album
+	albumAB db.Album
+	albumBA db.Album
+
+	collectionShared  db.Collection // admin's, public
+	collectionPrivate db.Collection // alt's, private
+	albumCollab       db.Album
+	albumSplit        db.Album // multi album-artists, no credit-as
+	albumCa           db.Album
+	albumCross        db.Album
+	albumVA           db.Album
+	albumEmpty        db.Album
 
 	trackAB1 db.Track
 	trackVA0 db.Track
@@ -433,6 +439,26 @@ func newFixture(tb testing.TB) *fixture {
 		},
 	))
 
+	// collections with stable timestamps, so getCollections and the getPlaylists mirror
+	// read deterministic content. mutation tests create their own.
+	f.collectionShared = db.Collection{
+		UserID: admin.ID, Name: "shared collection", Comment: "for testing",
+		IsPublic: true, CreatedAt: stableTime, UpdatedAt: stableTime,
+	}
+	require.NoError(tb, dbc.Save(&f.collectionShared).Error)
+	// deliberately not alphabetical, so a broken order shows up
+	require.NoError(tb, collection.SetAlbums(dbc, f.collectionShared.ID, []int{f.albumAB.ID, f.albumAA.ID}))
+
+	f.collectionPrivate = db.Collection{
+		UserID: alt.ID, Name: "private collection",
+		IsPublic: false, CreatedAt: stableTime, UpdatedAt: stableTime,
+	}
+	require.NoError(tb, dbc.Save(&f.collectionPrivate).Error)
+	require.NoError(tb, collection.SetAlbums(dbc, f.collectionPrivate.ID, []int{f.albumBA.ID}))
+
+	coverStore, err := covers.NewStore(filepath.Join(m.TmpDir(), "covers"))
+	require.NoError(tb, err)
+
 	f.contr = &Controller{
 		dbc:              dbc,
 		musicPaths:       musicPaths,
@@ -440,6 +466,9 @@ func newFixture(tb testing.TB) *fixture {
 		artistInfoCache:  artistinfocache.New(dbc, nil, nil),
 		albumInfoCache:   albuminfocache.New(dbc, nil, nil),
 		playlistStore:    playlistStore,
+		coverStore:       coverStore,
+		coverCache:       cache.New(filepath.Join(m.TmpDir(), "cache", "covers"), 0),
+		tagReader:        m.TagReader(),
 		resolveProxyPath: func(in string) string { return in },
 	}
 	return f

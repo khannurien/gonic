@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"go.senan.xyz/gonic/collection"
 	"go.senan.xyz/gonic/db"
 	playlistp "go.senan.xyz/gonic/playlist"
 	paramsp "go.senan.xyz/gonic/server/ctrlsubsonic/params"
@@ -43,7 +44,92 @@ func (c *Controller) ServeGetPlaylists(r *http.Request) *spec.Response {
 		}
 		sub.Playlists.List = append(sub.Playlists.List, rendered)
 	}
+
+	// collections are gonic's own concept, but a client that only speaks vanilla subsonic
+	// should still be able to play one. mirror each visible collection as a read only
+	// track playlist, synthesised here rather than written out as an m3u
+	mirrored, err := c.collectionsAsPlaylists(user, params)
+	if err != nil {
+		return spec.NewError(0, "render collections as playlists: %v", err)
+	}
+	sub.Playlists.List = append(sub.Playlists.List, mirrored...)
+
 	return sub
+}
+
+// collectionsAsPlaylists renders every collection the user may see as a read only playlist.
+// the ids stay native (co-N): playlist ids are opaque strings in subsonic, and dispatching
+// on id.Type is a total switch with no chance of colliding with a real m3u path.
+func (c *Controller) collectionsAsPlaylists(user *db.User, params paramsp.Params) ([]*spec.Playlist, error) {
+	var collections []*db.Collection
+	if err := c.dbc.
+		Scopes(collection.Visible(user.ID)).
+		Preload("User").
+		Order("collections.name COLLATE NOCASE").
+		Find(&collections).Error; err != nil {
+		return nil, fmt.Errorf("find collections: %w", err)
+	}
+
+	ret := make([]*spec.Playlist, 0, len(collections))
+	for _, coll := range collections {
+		rendered, err := c.collectionAsPlaylist(coll, user, params, false)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, rendered)
+	}
+	return ret, nil
+}
+
+func (c *Controller) collectionAsPlaylist(coll *db.Collection, user *db.User, params paramsp.Params, withItems bool) (*spec.Playlist, error) {
+	trackCount, duration, err := collection.Stats(c.dbc, coll.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &spec.Playlist{
+		ID:        *coll.SID(),
+		Name:      coll.Name,
+		Comment:   coll.Comment,
+		Created:   coll.CreatedAt,
+		Changed:   coll.UpdatedAt,
+		SongCount: trackCount,
+		Duration:  duration,
+		Public:    coll.IsPublic,
+	}
+	if coll.User != nil {
+		resp.Owner = coll.User.Name
+	}
+	if trackCount > 0 {
+		resp.CoverID = coll.SID()
+	}
+	if !withItems {
+		return resp, nil
+	}
+
+	var tracks []*spec.TrackRow
+	if err := c.dbc.
+		Scopes(spec.LoadTrackByFolder(user.ID), spec.CollectionTracks(coll.ID)).
+		Find(&tracks).Error; err != nil {
+		return nil, fmt.Errorf("find collection tracks: %w", err)
+	}
+
+	transcodeMeta := streamGetTranscodeMeta(c.dbc, user.ID, params.GetOr("c", ""))
+	resp.List = make([]*spec.TrackChild, 0, len(tracks))
+	for _, track := range tracks {
+		child := spec.NewTCTrackByFolder(track, track.Album)
+		child.TranscodeMeta = transcodeMeta
+		resp.List = append(resp.List, child)
+	}
+	resp.SongCount = len(resp.List)
+	return resp, nil
+}
+
+// errCollectionNotAPlaylist is what a vanilla client gets when it tries to edit a mirrored
+// collection. a track level edit has no sensible meaning against an ordered album list, so
+// refusing cleanly beats half supporting it.
+func errCollectionNotAPlaylist(verb string) *spec.Response {
+	return spec.NewError(0, "this playlist is a collection, %s it with %sCollection instead", verb, verb)
 }
 
 func (c *Controller) ServeGetPlaylist(r *http.Request) *spec.Response {
@@ -53,6 +139,20 @@ func (c *Controller) ServeGetPlaylist(r *http.Request) *spec.Response {
 	if err != nil {
 		return spec.NewError(10, "please provide an `id` parameter")
 	}
+	if playlistID.Type == specid.Collection {
+		coll, resp := c.collectionForRead(r)
+		if resp != nil {
+			return resp
+		}
+		rendered, err := c.collectionAsPlaylist(coll, user, params, true)
+		if err != nil {
+			return spec.NewError(0, "render collection as playlist: %v", err)
+		}
+		sub := spec.NewResponse()
+		sub.Playlist = rendered
+		return sub
+	}
+
 	playlist, err := c.playlistStore.Read(playlistIDDecode(playlistID))
 	if err != nil {
 		return spec.NewError(70, "playlist with id %s not found", playlistID)
@@ -74,6 +174,9 @@ func (c *Controller) ServeCreateOrUpdatePlaylist(r *http.Request) *spec.Response
 	params := r.Context().Value(CtxParams).(paramsp.Params)
 
 	playlistID, _ := params.GetFirstID("id", "playlistId")
+	if playlistID.Type == specid.Collection {
+		return errCollectionNotAPlaylist("update")
+	}
 	playlistPath := playlistIDDecode(playlistID)
 
 	var playlist playlistp.Playlist
@@ -134,6 +237,9 @@ func (c *Controller) ServeUpdatePlaylist(r *http.Request) *spec.Response {
 	if err != nil {
 		return spec.NewError(10, "please provide an `id` or `playlistId` parameter")
 	}
+	if playlistID.Type == specid.Collection {
+		return errCollectionNotAPlaylist("update")
+	}
 	playlistPath := playlistIDDecode(playlistID)
 	playlist, err := c.playlistStore.Read(playlistPath)
 	if err != nil {
@@ -188,6 +294,9 @@ func (c *Controller) ServeDeletePlaylist(r *http.Request) *spec.Response {
 	playlistID, err := params.GetFirstID("id", "playlistId")
 	if err != nil {
 		return spec.NewError(10, "please provide an `id` or `playlistId` parameter")
+	}
+	if playlistID.Type == specid.Collection {
+		return errCollectionNotAPlaylist("delete")
 	}
 	playlistPath := playlistIDDecode(playlistID)
 	playlist, err := c.playlistStore.Read(playlistPath)

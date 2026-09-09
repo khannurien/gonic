@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,8 @@ import (
 	"github.com/jinzhu/gorm"
 	"go.senan.xyz/wrtag/coverparse"
 
+	"go.senan.xyz/gonic/cache"
+	"go.senan.xyz/gonic/covers"
 	"go.senan.xyz/gonic/db"
 	"go.senan.xyz/gonic/fileutil"
 	"go.senan.xyz/gonic/infocache/artistinfocache"
@@ -76,6 +79,19 @@ func (c *Controller) ServeGetCoverArt(w http.ResponseWriter, r *http.Request) *s
 		}
 	}
 
+	// this preflight is a separate path from coverFor, so a private collection's mosaic
+	// would leak without it
+	if id.Type == specid.Collection {
+		user := r.Context().Value(CtxUser).(*db.User)
+		coll, err := c.collectionByID(id)
+		if err != nil {
+			return spec.NewError(70, "collection with id %s not found", id)
+		}
+		if coll.UserID != user.ID && !coll.IsPublic {
+			return spec.NewError(50, "you aren't allowed to read that user's collection")
+		}
+	}
+
 	c.coverCache.RLock()
 	defer c.coverCache.RUnlock()
 
@@ -97,7 +113,7 @@ func (c *Controller) ServeGetCoverArt(w http.ResponseWriter, r *http.Request) *s
 		return nil
 	}
 
-	reader, err := coverFor(c.dbc, c.artistInfoCache, c.playlistStore, c.tagReader, id)
+	reader, err := coverFor(c.dbc, c.artistInfoCache, c.playlistStore, c.coverStore, c.tagReader, id)
 	if err != nil {
 		return spec.NewError(70, "couldn't find cover %q: %v", id, err)
 	}
@@ -158,10 +174,10 @@ var (
 )
 
 // TODO: can we use specidpaths.Locate here?
-func coverFor(dbc *db.DB, artistInfoCache *artistinfocache.ArtistInfoCache, playlistStore *playlist.Store, tagReader tags.Reader, id specid.ID) (io.ReadCloser, error) {
+func coverFor(dbc *db.DB, artistInfoCache *artistinfocache.ArtistInfoCache, playlistStore *playlist.Store, coverStore *covers.Store, tagReader tags.Reader, id specid.ID) (io.ReadCloser, error) {
 	switch id.Type {
 	case specid.Album:
-		return coverForAlbum(dbc, id.Value)
+		return coverForAlbum(dbc, coverStore, id.Value)
 	case specid.Artist:
 		return coverForArtist(artistInfoCache, id.Value)
 	case specid.Podcast:
@@ -172,19 +188,25 @@ func coverFor(dbc *db.DB, artistInfoCache *artistinfocache.ArtistInfoCache, play
 		return coverForTrack(dbc, tagReader, id.Value)
 	case specid.Playlist:
 		return coverForPlaylist(playlistStore, id)
+	case specid.Collection:
+		return coverForCollection(dbc, coverStore, tagReader, id.Value)
 	default:
 		return nil, errCoverNotFound
 	}
 }
 
-func coverForAlbum(dbc *db.DB, id int) (*os.File, error) {
+func coverForAlbum(dbc *db.DB, coverStore *covers.Store, id int) (*os.File, error) {
 	var folder db.Album
 	err := dbc.DB.
-		Select("id, root_dir, left_path, right_path, cover").
+		Select("id, root_dir, left_path, right_path, cover, cover_override_hash, cover_override_ext").
 		First(&folder, id).
 		Error
 	if err != nil {
 		return nil, fmt.Errorf("select album: %w", err)
+	}
+	// an admin set this from a client. it lives in gonic's covers dir, not the music tree
+	if folder.CoverOverrideHash != "" && coverStore != nil {
+		return coverStore.Open(folder.CoverOverrideHash, folder.CoverOverrideExt)
 	}
 	if folder.Cover == "" {
 		return nil, errCoverEmpty
@@ -528,4 +550,62 @@ type zeroReader struct{}
 func (zeroReader) Read(p []byte) (int, error) {
 	clear(p)
 	return len(p), nil
+}
+
+// purgeCachedCovers drops every cached size and format for the given ids. call it whenever
+// the bytes behind an id change, otherwise getCoverArt keeps serving the old resize.
+func purgeCachedCovers(coverCache *cache.DirCache, ids ...specid.ID) error {
+	if coverCache == nil || len(ids) == 0 {
+		return nil
+	}
+	coverCache.RLock()
+	defer coverCache.RUnlock()
+
+	entries, err := os.ReadDir(coverCache.Path())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read cover cache dir: %w", err)
+	}
+	// prefix match rather than filepath.Glob: pl- ids are base64url and would need escaping
+	prefixes := make([]string, 0, len(ids))
+	for _, id := range ids {
+		prefixes = append(prefixes, id.String()+"-")
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(name, p) }) {
+			continue
+		}
+		if !slices.ContainsFunc(coverCacheFormats, func(f string) bool { return strings.HasSuffix(name, "."+f) }) {
+			continue
+		}
+		path, err := fileutil.SafeJoin(coverCache.Path(), name)
+		if err != nil {
+			continue
+		}
+		// ignore not exist, Eject may have raced us to it
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove cached cover: %w", err)
+		}
+	}
+	return nil
+}
+
+// PurgeCollectionCovers drops every cached collection mosaic. a scan can change a member
+// album's art with no mutation endpoint involved, so the composed images have to go.
+func PurgeCollectionCovers(dbc *db.DB, coverCache *cache.DirCache) error {
+	var ids []int
+	if err := dbc.Model(db.Collection{}).Pluck("id", &ids).Error; err != nil {
+		return fmt.Errorf("find collections: %w", err)
+	}
+	sids := make([]specid.ID, 0, len(ids))
+	for _, id := range ids {
+		sids = append(sids, specid.ID{Type: specid.Collection, Value: id})
+	}
+	return purgeCachedCovers(coverCache, sids...)
 }

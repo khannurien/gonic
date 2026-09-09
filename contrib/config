@@ -41,6 +41,12 @@ podcast-path                <path to your podcasts dir>
 # playlists-path             /srv/audio/playlists
 playlists-path              <path to your m3u playlist dir>
 
+# Directory where gonic stores cover art set from a client (searched, uploaded or
+# pasted). Never written to your music tree, which gonic only ever reads. This
+# must NOT live inside cache-path, which is pruned periodically. E.g.:
+# covers-path                /var/lib/gonic/covers
+#covers-path                 covers
+
 # Age (in days) to purge podcast episodes if not accessed. Disabled by default.
 #podcast-purge-age           0
 

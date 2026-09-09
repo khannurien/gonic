@@ -65,11 +65,8 @@ func NewAlbumByTags(a *AlbumRow, credits []*db.AlbumCredit) *Album {
 		RecordLabels:  []*RecordLabel{},
 		DiscTitles:    []*DiscTitle{},
 	}
-	if a.Cover != "" {
-		ret.CoverID = a.SID()
-	} else if a.EmbeddedCoverTrackID != nil {
-		ret.CoverID = a.EmbeddedCoverTrackSID()
-	}
+	ret.CoverID = a.CoverSID()
+	ret.CoverArtToken = CoverArtToken(&a.Album)
 	if a.AlbumStar != nil {
 		ret.Starred = &a.AlbumStar.StarDate
 	}
@@ -150,13 +147,10 @@ func NewTrackByTags(client string, t *TrackRow, album *db.Album) *TrackChild {
 		Year:               t.TagYear,
 	}
 
-	switch {
-	case t.HasEmbeddedCover:
+	if t.HasEmbeddedCover {
 		ret.CoverID = t.SID()
-	case album.Cover != "":
-		ret.CoverID = album.SID()
-	case album.EmbeddedCoverTrackID != nil:
-		ret.CoverID = album.EmbeddedCoverTrackSID()
+	} else {
+		ret.CoverID = album.CoverSID()
 	}
 
 	if t.TrackStar != nil {
@@ -305,4 +299,15 @@ func NewGenre(g *GenreRow) *Genre {
 		AlbumCount: g.AlbumCount,
 		SongCount:  g.TrackCount,
 	}
+}
+
+// coverArtToken changes whenever an admin replaces an album's art, so a client can bust its
+// own http cache. only overrides get one: a scanner-found cover has no token that's stable
+// across requests, and it can't change without a rescan anyway.
+// CoverArtToken is exported for the cover management handlers.
+func CoverArtToken(album *db.Album) string {
+	if album.CoverOverrideHash == "" {
+		return ""
+	}
+	return album.CoverOverrideHash[:12]
 }

@@ -4,6 +4,10 @@ package mockfs
 import (
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,6 +302,27 @@ func (m *MockFS) AddCover(path string) {
 		m.t.Fatalf("create cover: %v", err)
 	}
 	defer f.Close()
+}
+
+// AddRealCover writes a cover that actually decodes. AddCover creates an empty file, which
+// is enough for the scanner (coverparse only looks at the name) but not for anything that
+// has to read the image, like the collection mosaic.
+func (m *MockFS) AddRealCover(path string, w, h int, c color.Color) {
+	abspath := filepath.Join(m.dir, path)
+	if err := os.MkdirAll(filepath.Dir(abspath), os.ModePerm); err != nil {
+		m.t.Fatalf("mkdir: %v", err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: c}, image.Point{}, draw.Src)
+
+	f, err := os.Create(abspath)
+	if err != nil {
+		m.t.Fatalf("create cover: %v", err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		m.t.Fatalf("encode cover: %v", err)
+	}
 }
 
 func newTagInfo() *TagInfo {

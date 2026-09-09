@@ -34,11 +34,17 @@ import (
 
 	"go.senan.xyz/gonic"
 	"go.senan.xyz/gonic/cache"
+	"go.senan.xyz/gonic/coverartarchive"
+	"go.senan.xyz/gonic/covers"
+	"go.senan.xyz/gonic/coversearch"
 	"go.senan.xyz/gonic/db"
+	"go.senan.xyz/gonic/deezer"
 	"go.senan.xyz/gonic/deps"
+	"go.senan.xyz/gonic/fileutil"
 	"go.senan.xyz/gonic/handlerutil"
 	"go.senan.xyz/gonic/infocache/albuminfocache"
 	"go.senan.xyz/gonic/infocache/artistinfocache"
+	"go.senan.xyz/gonic/itunes"
 	"go.senan.xyz/gonic/jukebox"
 	"go.senan.xyz/gonic/lastfm"
 	"go.senan.xyz/gonic/listenbrainz"
@@ -70,6 +76,8 @@ func main() {
 	flag.Var(&confMusicPaths, "music-path", "path to music")
 
 	confPlaylistsPath := flag.String("playlists-path", "", "path to your list of new or existing m3u playlists that gonic can manage")
+
+	confCoversPath := flag.String("covers-path", "", "path to store cover art set from a client. defaults to a \"covers\" dir beside the database. never written to the music tree, and must not be inside -cache-path (optional)")
 
 	confDBPath := flag.String("db-path", "gonic.db", "path to database (optional)")
 
@@ -151,6 +159,23 @@ func main() {
 		log.Fatalf("couldn't create covers cache path: %v\n", err)
 	}
 
+	// unlike the other path flags this one is created for you rather than having to exist
+	// already, so make it before validating
+	if *confCoversPath == "" {
+		*confCoversPath = path.Join(filepath.Dir(*confDBPath), "covers")
+	}
+	if err := os.MkdirAll(*confCoversPath, os.ModePerm); err != nil {
+		log.Fatalf("couldn't create covers path: %v\n", err)
+	}
+	if *confCoversPath, err = validatePath(*confCoversPath); err != nil {
+		log.Fatalf("checking covers directory: %v", err)
+	}
+	// the cover cache is LRU ejected on a ticker, so a covers dir inside it would have the
+	// originals silently deleted out from under the database
+	if fileutil.HasPrefix(*confCoversPath, *confCachePath) {
+		log.Fatalf("covers path %q must not be inside the cache path %q", *confCoversPath, *confCachePath)
+	}
+
 	var genreTree map[string][]string
 	if *confGenreTree != "" {
 		genreTree, err = texttree.ParseFile(*confGenreTree)
@@ -174,6 +199,14 @@ func main() {
 	})
 	if err != nil {
 		log.Panicf("error migrating database: %v\n", err)
+	}
+
+	// covers a db restored from backup, or manual surgery, where no scan has run yet
+	if _, err := dbc.HealAlbumCoverOverrides(); err != nil {
+		log.Printf("error healing album cover overrides: %v", err)
+	}
+	if _, err := dbc.HealCollectionAlbums(); err != nil {
+		log.Printf("error healing collection albums: %v", err)
 	}
 
 	spec.Warm(dbc.DB)
@@ -240,6 +273,18 @@ func main() {
 	lastfmClient := lastfm.NewClient(userAgent, lastfmClientKeySecretFunc)
 	mbClient := musicbrainz.NewClient(userAgent)
 
+	coverSearcher := &coversearch.Searcher{
+		MusicBrainz:     mbClient,
+		CoverArtArchive: coverartarchive.NewClient(userAgent),
+		Deezer:          deezer.NewClient(userAgent),
+		ITunes:          itunes.NewClient(userAgent),
+	}
+
+	coverStore, err := covers.NewStore(*confCoversPath)
+	if err != nil {
+		log.Panicf("error creating cover store: %v\n", err)
+	}
+
 	playlistStore, err := playlist.NewStore(*confPlaylistsPath)
 	if err != nil {
 		log.Panicf("error creating playlists store: %v", err)
@@ -280,7 +325,15 @@ func main() {
 		log.Panicf("error creating admin controller: %v\n", err)
 	}
 	coverCache := cache.New(cacheDirCovers, *confCoverCacheSize)
-	ctrlSubsonic, err := ctrlsubsonic.New(dbc, scannr, musicPaths, *confPodcastPath, cacheDirAudio, coverCache, jukebx, playlistStore, scrobblers, podcast, transcoder, lastfmClient, artistInfoCache, albumInfoCache, tagReader, resolveProxyPath)
+
+	// a scan can change an album's folder cover with no endpoint involved, which leaves
+	// every collection mosaic built from it stale
+	scannr.OnComplete = func() {
+		if err := ctrlsubsonic.PurgeCollectionCovers(dbc, coverCache); err != nil {
+			log.Printf("error purging collection covers after scan: %v", err)
+		}
+	}
+	ctrlSubsonic, err := ctrlsubsonic.New(dbc, scannr, musicPaths, *confPodcastPath, cacheDirAudio, coverCache, jukebx, playlistStore, coverStore, coverSearcher, scrobblers, podcast, transcoder, lastfmClient, artistInfoCache, albumInfoCache, tagReader, resolveProxyPath)
 	if err != nil {
 		log.Panicf("error creating subsonic controller: %v\n", err)
 	}

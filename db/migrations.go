@@ -103,6 +103,8 @@ func (db *DB) Migrate(ctx MigrationContext) error {
 		construct(ctx, "202607141500", migrateAlbumVersion),
 		construct(ctx, "202607171200", migrateAddPodcastEpisodeGUID),
 		construct(ctx, "202607241200", migrateClearUnknownAudioProperties),
+		construct(ctx, "202609091200", migrateAddAlbumCoverOverrides),
+		construct(ctx, "202609091300", migrateAddCollections),
 	}
 
 	return gormigrate.
@@ -1098,4 +1100,21 @@ func migrateClearUnknownAudioProperties(tx *gorm.DB, _ MigrationContext) error {
 		UPDATE podcast_episodes SET bitrate=0 WHERE bitrate=4294967295;
 		UPDATE podcast_episodes SET length=0 WHERE length=4294967;
 	`).Error
+}
+
+func migrateAddAlbumCoverOverrides(tx *gorm.DB, _ MigrationContext) error {
+	if err := tx.AutoMigrate(AlbumCoverOverride{}, Album{}).Error; err != nil {
+		return fmt.Errorf("automigrate album cover override: %w", err)
+	}
+	// one override per album, but many rows can be orphaned (album_id IS NULL) at once, so
+	// the unique index has to be partial. gorm v1 can't express that, same as
+	// uix_artists_music_brainz_id above
+	return tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS uix_album_cover_overrides_album_id
+			ON album_cover_overrides (album_id) WHERE album_id IS NOT NULL;
+	`).Error
+}
+
+func migrateAddCollections(tx *gorm.DB, _ MigrationContext) error {
+	return tx.AutoMigrate(Collection{}, CollectionAlbum{}).Error
 }

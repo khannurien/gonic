@@ -17,6 +17,29 @@
           "changed": "2020-05-01T12:00:00Z",
           "duration": 0,
           "public": true
+        },
+        {
+          "id": "co-2",
+          "name": "private collection",
+          "comment": "",
+          "owner": "alt",
+          "songCount": 1,
+          "created": "2020-05-01T12:00:00Z",
+          "changed": "2020-05-01T12:00:00Z",
+          "duration": 100,
+          "coverArt": "co-2"
+        },
+        {
+          "id": "co-1",
+          "name": "shared collection",
+          "comment": "for testing",
+          "owner": "admin",
+          "songCount": 5,
+          "created": "2020-05-01T12:00:00Z",
+          "changed": "2020-05-01T12:00:00Z",
+          "duration": 500,
+          "public": true,
+          "coverArt": "co-1"
         }
       ]
     }

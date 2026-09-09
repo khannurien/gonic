@@ -67,6 +67,12 @@ type Response struct {
 	OpenSubsonic           bool                    `xml:"openSubsonic,attr"      json:"openSubsonic"`
 	OpenSubsonicExtensions *OpenSubsonicExtensions `xml:"openSubsonicExtensions" json:"openSubsonicExtensions,omitempty"`
 
+	// gonic extensions
+	CoverArt       *CoverArt       `xml:"coverArt" json:"coverArt,omitempty"`
+	CoverArtSearch *CoverArtSearch `xml:"coverArtSearch" json:"coverArtSearch,omitempty"`
+	Collections    *Collections    `xml:"collections" json:"collections,omitempty"`
+	Collection     *Collection     `xml:"collection" json:"collection,omitempty"`
+
 	Error                 *Error                 `xml:"error"                 json:"error,omitempty"`
 	Albums                *Albums                `xml:"albumList"             json:"albumList,omitempty"`
 	AlbumsTwo             *Albums                `xml:"albumList2"            json:"albumList2,omitempty"`
@@ -192,6 +198,10 @@ type Album struct {
 	ParentID *specid.ID `xml:"parent,attr,omitempty"   json:"parent,omitempty"`
 	IsDir    bool       `xml:"isDir,attr,omitempty"    json:"isDir,omitempty"`
 	CoverID  *specid.ID `xml:"coverArt,attr,omitempty" json:"coverArt,omitempty"`
+	// CoverArtToken changes whenever an admin replaces this album's art. clients append it
+	// to the getCoverArt url so their own cache can't keep serving the old cover. only set
+	// when there's an override: a scanner-found cover has no stable token to give
+	CoverArtToken string `xml:"coverArtToken,attr,omitempty" json:"coverArtToken,omitempty"`
 
 	Name       string        `xml:"name,attr"              json:"name"`
 	TrackCount int           `xml:"songCount,attr"         json:"songCount"`
@@ -385,16 +395,19 @@ type Playlists struct {
 }
 
 type Playlist struct {
-	ID        specid.ID     `xml:"id,attr"         json:"id"`
-	Name      string        `xml:"name,attr"       json:"name"`
-	Comment   string        `xml:"comment,attr"    json:"comment"`
-	Owner     string        `xml:"owner,attr"      json:"owner"`
-	SongCount int           `xml:"songCount,attr"  json:"songCount"`
-	Created   time.Time     `xml:"created,attr"    json:"created"`
-	Changed   time.Time     `xml:"changed,attr"    json:"changed"`
-	Duration  int           `xml:"duration,attr"   json:"duration"`
-	Public    bool          `xml:"public,attr"     json:"public,omitempty"`
-	List      []*TrackChild `xml:"entry,omitempty" json:"entry,omitempty"`
+	ID        specid.ID `xml:"id,attr"         json:"id"`
+	Name      string    `xml:"name,attr"       json:"name"`
+	Comment   string    `xml:"comment,attr"    json:"comment"`
+	Owner     string    `xml:"owner,attr"      json:"owner"`
+	SongCount int       `xml:"songCount,attr"  json:"songCount"`
+	Created   time.Time `xml:"created,attr"    json:"created"`
+	Changed   time.Time `xml:"changed,attr"    json:"changed"`
+	Duration  int       `xml:"duration,attr"   json:"duration"`
+	Public    bool      `xml:"public,attr"     json:"public,omitempty"`
+	// CoverID is only set for mirrored collections. m3u playlists have always been served
+	// without one, and adding it for them is a separate change
+	CoverID *specid.ID    `xml:"coverArt,attr,omitempty" json:"coverArt,omitempty"`
+	List    []*TrackChild `xml:"entry,omitempty"         json:"entry,omitempty"`
 }
 
 type ArtistInfo struct {
@@ -616,4 +629,63 @@ func CleanExternalText(text string) string {
 	text = strings.Join(strings.Fields(text), " ")
 	text = strings.TrimSpace(text)
 	return text
+}
+
+// CoverArt describes the art currently serving for an album, and where it came from. it's
+// a gonic extension, gated behind the "coverArtManagement" OpenSubsonic extension.
+type CoverArt struct {
+	ID      specid.ID  `xml:"id,attr"                  json:"id"`
+	CoverID *specid.ID `xml:"coverArt,attr,omitempty" json:"coverArt,omitempty"`
+	// Token changes whenever the bytes behind CoverID change. clients append it to the
+	// getCoverArt url as an ignored param so their own http cache can't serve a stale
+	// cover for the fortnight that getCoverArt's max-age allows
+	Token      string     `xml:"token,attr"                 json:"token"`
+	Overridden bool       `xml:"overridden,attr"            json:"overridden"`
+	Source     string     `xml:"source,attr,omitempty"      json:"source,omitempty"`
+	SourceURL  string     `xml:"sourceUrl,attr,omitempty"   json:"sourceUrl,omitempty"`
+	Width      int        `xml:"width,attr,omitempty"       json:"width,omitempty"`
+	Height     int        `xml:"height,attr,omitempty"      json:"height,omitempty"`
+	Size       int        `xml:"size,attr,omitempty"        json:"size,omitempty"`
+	UpdatedBy  string     `xml:"updatedBy,attr,omitempty"   json:"updatedBy,omitempty"`
+	UpdatedAt  *time.Time `xml:"updatedAt,attr,omitempty" json:"updatedAt,omitempty"`
+}
+
+type CoverArtSearch struct {
+	List []*CoverArtSearchResult `xml:"result" json:"result"`
+}
+
+type CoverArtSearchResult struct {
+	Source       string `xml:"source,attr"                 json:"source"`
+	URL          string `xml:"url,attr"                    json:"url"`
+	ThumbnailURL string `xml:"thumbnailUrl,attr,omitempty" json:"thumbnailUrl,omitempty"`
+	Title        string `xml:"title,attr,omitempty"        json:"title,omitempty"`
+	Artist       string `xml:"artist,attr,omitempty"       json:"artist,omitempty"`
+	Width        int    `xml:"width,attr,omitempty"        json:"width,omitempty"`
+	Height       int    `xml:"height,attr,omitempty"       json:"height,omitempty"`
+}
+
+// Collections and Collection are a gonic extension: an ordered list of whole albums,
+// gated behind the "collections" OpenSubsonic extension. vanilla clients see the same
+// thing mirrored read only through getPlaylists.
+type Collections struct {
+	List []*Collection `xml:"collection" json:"collection"`
+}
+
+type Collection struct {
+	ID         specid.ID  `xml:"id,attr"                 json:"id"`
+	Name       string     `xml:"name,attr"               json:"name"`
+	Comment    string     `xml:"comment,attr"            json:"comment"`
+	Owner      string     `xml:"owner,attr"              json:"owner"`
+	Public     bool       `xml:"public,attr"             json:"public"`
+	AlbumCount int        `xml:"albumCount,attr"         json:"albumCount"`
+	SongCount  int        `xml:"songCount,attr"          json:"songCount"`
+	Duration   int        `xml:"duration,attr"           json:"duration"`
+	Created    time.Time  `xml:"created,attr"            json:"created"`
+	Changed    time.Time  `xml:"changed,attr"            json:"changed"`
+	CoverID    *specid.ID `xml:"coverArt,attr,omitempty" json:"coverArt,omitempty"`
+
+	List []*Album `xml:"album,omitempty" json:"album,omitempty"`
+	// Tracks is the expansion, returned by getCollection so a client can play the whole
+	// thing without fetching every album
+	Tracks []*TrackChild `xml:"entry,omitempty" json:"entry,omitempty"`
 }

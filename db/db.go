@@ -341,18 +341,24 @@ type TrackPlay struct {
 }
 
 type Album struct {
-	ID                   int `gorm:"primary_key"`
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-	ModifiedAt           time.Time
-	LeftPath             string `gorm:"unique_index:idx_album_abs_path"`
-	RightPath            string `gorm:"not null; unique_index:idx_album_abs_path" sql:"default: null"`
-	RightPathUDec        string `sql:"default: null"`
-	Parent               *Album
-	ParentID             int            `sql:"default: null; type:int REFERENCES albums(id) ON DELETE CASCADE"`
-	RootDir              string         `gorm:"unique_index:idx_album_abs_path" sql:"default: null"`
-	Genres               []*Genre       `gorm:"many2many:album_genres"`
-	Cover                string         `sql:"default: null"`
+	ID            int `gorm:"primary_key"`
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	ModifiedAt    time.Time
+	LeftPath      string `gorm:"unique_index:idx_album_abs_path"`
+	RightPath     string `gorm:"not null; unique_index:idx_album_abs_path" sql:"default: null"`
+	RightPathUDec string `sql:"default: null"`
+	Parent        *Album
+	ParentID      int      `sql:"default: null; type:int REFERENCES albums(id) ON DELETE CASCADE"`
+	RootDir       string   `gorm:"unique_index:idx_album_abs_path" sql:"default: null"`
+	Genres        []*Genre `gorm:"many2many:album_genres"`
+	Cover         string   `sql:"default: null"`
+	// CoverOverrideHash/Ext denormalise the admin's cover override (see AlbumCoverOverride)
+	// onto the album row. the override table is the durable record; these columns are the
+	// read path, so every query that already selects albums.* picks the override up with
+	// no join. HealAlbumCoverOverrides keeps them in sync.
+	CoverOverrideHash    string         `sql:"default: null"`
+	CoverOverrideExt     string         `sql:"default: null"`
 	EmbeddedCoverTrackID *int           `sql:"default: null; type:int REFERENCES tracks(id) ON DELETE SET NULL"`
 	Credits              []*AlbumCredit `gorm:"foreignkey:album_id"`
 	TagTitle             string         `sql:"default: null"`
@@ -383,11 +389,83 @@ func (a *Album) EmbeddedCoverTrackSID() *specid.ID {
 	return &specid.ID{Type: specid.Track, Value: *a.EmbeddedCoverTrackID}
 }
 
+// CoverSID returns the id a client should ask getCoverArt for, or nil if the album has no
+// art at all. an admin override beats the folder cover beats a track's embedded cover.
+func (a *Album) CoverSID() *specid.ID {
+	switch {
+	case a.CoverOverrideHash != "":
+		return a.SID()
+	case a.Cover != "":
+		return a.SID()
+	case a.EmbeddedCoverTrackID != nil:
+		return a.EmbeddedCoverTrackSID()
+	}
+	return nil
+}
+
 func (a *Album) IndexRightPath() string {
 	if len(a.RightPathUDec) > 0 {
 		return a.RightPathUDec
 	}
 	return a.RightPath
+}
+
+// AlbumCoverOverride is cover art an admin set from a client, stored in gonic's own covers
+// dir and never in the music tree. the path triple is the durable identity: cleanAlbums
+// hard deletes album rows on rename or db rebuild and album ids are autoincrement, so
+// AlbumID is only a fast path that HealAlbumCoverOverrides re-resolves.
+type AlbumCoverOverride struct {
+	ID        int    `gorm:"primary_key"`
+	AlbumID   *int   `sql:"default: null; type:int REFERENCES albums(id) ON DELETE SET NULL"`
+	RootDir   string `gorm:"not null; unique_index:idx_album_cover_override_abs_path" sql:"default: ''"`
+	LeftPath  string `gorm:"unique_index:idx_album_cover_override_abs_path"`
+	RightPath string `gorm:"not null; unique_index:idx_album_cover_override_abs_path" sql:"default: ''"`
+
+	Hash   string `gorm:"not null; index" sql:"default: ''"` // sha256 hex of the normalized bytes
+	Ext    string `gorm:"not null" sql:"default: ''"`        // "jpg" | "png"
+	MIME   string `sql:"default: ''"`
+	Width  int
+	Height int
+	Size   int
+
+	Source    string `sql:"default: ''"` // upload | url | embedded | coverartarchive | deezer | itunes
+	SourceURL string `sql:"default: ''"`
+
+	UpdatedAt       time.Time
+	UpdatedByUserID *int `sql:"default: null; type:int REFERENCES users(id) ON DELETE SET NULL"`
+}
+
+// Collection is an ordered list of whole albums. unlike playlists (which are m3u files on
+// disk) collections live in the db, because their members change under them when the
+// library is rescanned and reordering has to be reliable.
+type Collection struct {
+	ID        int `gorm:"primary_key"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	UserID    int `gorm:"not null; index" sql:"default: null; type:int REFERENCES users(id) ON DELETE CASCADE"`
+	User      *User
+	Name      string             `gorm:"not null" sql:"default: ''"`
+	Comment   string             `sql:"default: ''"`
+	IsPublic  bool               `sql:"default: false"`
+	Albums    []*CollectionAlbum `gorm:"foreignkey:collection_id"`
+}
+
+func (c *Collection) SID() *specid.ID {
+	return &specid.ID{Type: specid.Collection, Value: c.ID}
+}
+
+// CollectionAlbum is one album in a collection. the column is Position, not Index, because
+// INDEX is a SQLite keyword. RootDir/LeftPath/RightPath are the durable identity, see
+// AlbumCoverOverride.
+type CollectionAlbum struct {
+	ID           int  `gorm:"primary_key"`
+	CollectionID int  `gorm:"not null; unique_index:idx_collection_album_position" sql:"default: null; type:int REFERENCES collections(id) ON DELETE CASCADE"`
+	Position     int  `gorm:"not null; unique_index:idx_collection_album_position"`
+	AlbumID      *int `sql:"default: null; type:int REFERENCES albums(id) ON DELETE SET NULL"`
+	Album        *Album
+	RootDir      string `sql:"default: ''"`
+	LeftPath     string `sql:"default: ''"`
+	RightPath    string `sql:"default: ''"`
 }
 
 type PlayQueue struct {
