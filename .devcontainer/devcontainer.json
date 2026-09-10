@@ -1,0 +1,44 @@
+{
+	"name": "gonic",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+
+	// Host networking, so gonic on :4747 and the frontend's vite server on
+	// :5173 reach each other and the host browser as plain localhost.
+	"runArgs": ["--network=host"],
+
+	// The sibling fork, mounted read-write, so a Claude Code session started
+	// in here can read and edit the frontend as well. Delete this block if you
+	// only have gonic checked out.
+	"mounts": [
+		{
+			"source": "${localWorkspaceFolder}/../airsonic-refix",
+			"target": "/workspaces/airsonic-refix",
+			"type": "bind"
+		}
+	],
+
+	// Keeps `go run ./cmd/gonic` self-contained: state lands in .dev/ instead
+	// of the /data, /music, /cache paths the release image expects. Point
+	// GONIC_MUSIC_PATH at a real library when you need one.
+	"containerEnv": {
+		"GONIC_DB_PATH": "${containerWorkspaceFolder}/.dev/gonic.db",
+		"GONIC_MUSIC_PATH": "${containerWorkspaceFolder}/.dev/music",
+		"GONIC_PODCAST_PATH": "${containerWorkspaceFolder}/.dev/podcasts",
+		"GONIC_CACHE_PATH": "${containerWorkspaceFolder}/.dev/cache",
+		"GONIC_PLAYLISTS_PATH": "${containerWorkspaceFolder}/.dev/playlists",
+		"GONIC_LISTEN_ADDR": "0.0.0.0:4747"
+	},
+
+	"postCreateCommand": "mkdir -p .dev/music .dev/podcasts .dev/cache .dev/playlists && go mod download",
+
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go",
+				"qwtel.sqlite-viewer"
+			]
+		}
+	}
+}

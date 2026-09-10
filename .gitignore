@@ -7,7 +7,6 @@ _test*
 dist
 *.sql
 ./gonic
-.devcontainer
 .vscode
 *.swp
 .tags*
