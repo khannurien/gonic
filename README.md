@@ -2,7 +2,7 @@
 <h4 align="center">free-software <a href="http://www.subsonic.org/">subsonic</a> server API implementation, supporting its <a href="https://github.com/sentriz/gonic?tab=readme-ov-file#features">many clients</a></h4>
 <p align="center">
   <a href="http://hub.docker.com/r/sentriz/gonic"><img src="https://img.shields.io/docker/pulls/sentriz/gonic.svg"></a>
-  <a href="https://repology.org/project/gonic/"><img src="https://repology.org/badge/tiny-repos/gonic.svg"></a>
+  <a href="https://repology.org/project/gonic/versions"><img src="https://repology.org/badge/tiny-repos/gonic.svg"></a>
   <a href="https://github.com/sentriz/gonic/releases"><img src="https://img.shields.io/github/v/release/sentriz/gonic.svg"></a>
   <a href="https://web.libera.chat/#gonic"><img src="https://img.shields.io/badge/libera.chat-%23gonic-blue.svg"></a>
 </p>
@@ -66,6 +66,7 @@ password can then be changed from the web interface
 | `GONIC_SCAN_AT_START_ENABLED`       | `-scan-at-start-enabled`       | **optional** whether to perform an initial scan at startup                                                                                                                                                                                                                        |
 | `GONIC_SCAN_WATCHER_ENABLED`        | `-scan-watcher-enabled`        | **optional** whether to watch file system for new music and rescan                                                                                                                                                                                                                |
 | `GONIC_SCAN_EMBEDDED_COVER_ENABLED` | `-scan-embedded-cover-enabled` | **optional** whether to scan for embedded covers in audio files (_default_ `true`)                                                                                                                                                                                                |
+| `GONIC_SCAN_NON_ADMIN_ENABLED`      | `-scan-non-admin-enabled`      | **optional** whether non-admin users can start a scan via the subsonic api. by default only admin users can                                                                                                                                                                       |
 | `GONIC_JUKEBOX_ENABLED`             | `-jukebox-enabled`             | **optional** whether the subsonic [jukebox api](https://airsonic.github.io/docs/jukebox/) should be enabled                                                                                                                                                                       |
 | `GONIC_JUKEBOX_MPV_EXTRA_ARGS`      | `-jukebox-mpv-extra-args`      | **optional** extra command line arguments to pass to the jukebox mpv daemon                                                                                                                                                                                                       |
 | `GONIC_PODCAST_PURGE_AGE`           | `-podcast-purge-age`           | **optional** age (in days) to purge podcast episodes if not accessed                                                                                                                                                                                                              |
@@ -88,9 +89,11 @@ the available modes are:
 
 | value            | desc                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `multi`          | gonic will explictly look for multi value fields in your audio metadata such as "genres" or "album_artists". software like [musicbrainz picard](https://picard.musicbrainz.org/), [beets](https://beets.io/) (v1.6.1+ / master), [wrtag](https://github.com/sentriz/wrtag/), or [betanin](https://github.com/sentriz/betanin/) can set set these                                                                                                            |
+| `multi`          | gonic will explicitly look for multi value fields in your audio metadata such as "genres" or "album_artists". software like [musicbrainz picard](https://picard.musicbrainz.org/), [beets](https://beets.io/) (v1.6.1+ / master), [wrtag](https://github.com/sentriz/wrtag/), or [betanin](https://github.com/sentriz/betanin/) can set these. if a file doesn't have them, gonic falls back to the normal fields like "genre" or "album_artist"            |
 | `delim <delim>`  | gonic will look at your normal audio metadata fields like "genre" or "album_artist", but split them on a delimiter. for example you could set `-multi-value-genre "delim ;"` to split the single genre field on ";". note this mode is not recommended unless you use an uncommon delimiter such as ";" or "\|". using a delimiter like "&" will likely lead to many [false positives](https://musicbrainz.org/artist/ccd4879c-5e88-4385-b131-bf65296bf245) |
-| `none` (default) | gonic will not attempt to do any multi value processing                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `none` (default) | gonic will look at your normal audio metadata fields like "genre" or "album_artist" without splitting them. multi value fields like "genres" are ignored                                                                                                                                                                                                                                                                                                    |
+
+in every mode, a field stored with several values (such as more than one "genre" entry) is read in full. the same setting applies to the matching musicbrainz id and credit fields, like "musicbrainz_artistid" and "artists_credit". these are only paired with names when their counts match, so a joined name like "A & B" won't take on the musicbrainz id of "A".
 
 note: `,` is a special character in the environment variable parser. if you wish to use `,` for example for splitting genres, the `,` must be escaped with `\`. for example `"delim \,"`.
 
@@ -171,3 +174,13 @@ music
             ├── 03.13 Jab Gee.flac
             └── folder.jpg
 ```
+
+## ignoring folders
+
+to exclude a folder and everything beneath it from scanning, create an empty file named `.gonicignore` inside it.
+
+```shell
+$ touch "/path/to/music/Alan Vega/(1980) Alan Vega [MP3]/.gonicignore"
+```
+
+for excluding by name across the whole library, see the `-exclude-pattern` option.

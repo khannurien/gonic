@@ -4,7 +4,6 @@ package ctrlsubsonic
 import (
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jinzhu/gorm"
@@ -12,6 +11,7 @@ import (
 	"go.senan.xyz/gonic/db"
 	"go.senan.xyz/gonic/server/ctrlsubsonic/params"
 	"go.senan.xyz/gonic/server/ctrlsubsonic/spec"
+	"go.senan.xyz/gonic/transcode"
 )
 
 // the subsonic spec mentions "artist" a lot when talking about the
@@ -84,7 +84,6 @@ func (c *Controller) ServeGetMusicDirectory(r *http.Request) *spec.Response {
 	err = c.dbc.
 		Scopes(spec.LoadAlbumByFolder(user.ID)).
 		Where("parent_id=?", id.Value).
-		Order("tag_year").
 		Order("albums.right_path COLLATE NOCASE").
 		Find(&childFolders).
 		Error
@@ -114,8 +113,8 @@ func (c *Controller) ServeGetMusicDirectory(r *http.Request) *spec.Response {
 		toAppend := spec.NewTCTrackByFolder(ch, &folder.Album)
 		if v, _ := params.Get("c"); v == "Jamstash" {
 			// jamstash thinks it can't play flacs
-			toAppend.ContentType = "audio/mpeg"
-			toAppend.Suffix = "mp3"
+			toAppend.ContentType = transcode.CodecMP3.MIME
+			toAppend.Suffix = transcode.CodecMP3.Suffix
 		}
 		toAppend.TranscodeMeta = transcodeMeta
 		childrenObj = append(childrenObj, toAppend)
@@ -153,13 +152,13 @@ func (c *Controller) ServeGetAlbumList(r *http.Request) *spec.Response {
 		q = q.Joins("JOIN genres ON genres.id=album_genres.genre_id AND genres.name=?", genre)
 		q = q.Order("right_path")
 	case "frequent":
-		q = q.Having("play_length > 0").Order("play_length DESC")
+		q = q.Scopes(spec.WithAlbumPlayStats(user.ID)).Having("play_length > 0").Order("play_length DESC")
 	case "newest":
 		q = q.Order("created_at DESC")
 	case "random":
 		q = q.Order(gorm.Expr("random()"))
 	case "recent":
-		q = q.Having("play_time IS NOT NULL").Order("play_time DESC")
+		q = q.Scopes(spec.WithAlbumPlayStats(user.ID)).Having("play_time IS NOT NULL").Order("play_time DESC")
 	case "starred":
 		q = q.Joins("JOIN album_stars ON albums.id=album_stars.album_id AND album_stars.user_id=?", user.ID)
 		q = q.Order("right_path")
@@ -170,21 +169,15 @@ func (c *Controller) ServeGetAlbumList(r *http.Request) *spec.Response {
 		return spec.NewError(10, "unknown value %q for parameter 'type'", v)
 	}
 
-	q = q.Scopes(spec.WithAlbumRootDir(getMusicFolder(c.musicPaths, params)))
-	var folders []*spec.AlbumRow
-	// TODO: think about removing this extra join to count number
-	// of children. it might make sense to store that in the db
-	err := q.
-		Scopes(spec.AlbumWithUserPlay(user.ID), spec.AlbumWithUserData(user.ID)).
-		Joins("JOIN album_credits ON album_credits.album_id=albums.id AND album_credits.role=?", db.RoleAlbumArtist).
-		Offset(params.GetOrInt("offset", 0)).
-		Limit(params.GetOrInt("size", 10)).
-		Preload("Parent").
-		Find(&folders).
-		Error
+	q = q.
+		Scopes(spec.WithAlbumRootDir(getMusicFolder(c.musicPaths, params))).
+		Joins("JOIN album_credits ON album_credits.album_id=albums.id AND album_credits.role=?", db.RoleAlbumArtist)
+
+	folders, err := findAlbumPage(q, params.GetOrInt("offset", 0), params.GetOrInt("size", 10), spec.LoadAlbumListByFolder(user.ID))
 	if err != nil {
 		return spec.NewError(0, "error finding albums: %v", err)
 	}
+
 	sub := spec.NewResponse()
 	sub.Albums = &spec.Albums{
 		List: make([]*spec.Album, len(folders)),
@@ -206,10 +199,7 @@ func (c *Controller) ServeSearchTwo(r *http.Request) *spec.Response {
 	var isUUID = uuid.Validate(query) == nil
 	var isAll = query == `""`
 
-	var fuzzy = query
-	fuzzy = strings.Join(strings.Fields(fuzzy), "%")
-	fuzzy = strings.ToLower(fuzzy)
-	fuzzy = "%" + fuzzy + "%"
+	fuzzy := buildFuzzy(query)
 
 	musicFolder := getMusicFolder(c.musicPaths, params)
 	results := &spec.SearchResultTwo{}

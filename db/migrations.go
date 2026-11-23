@@ -105,6 +105,10 @@ func (db *DB) Migrate(ctx MigrationContext) error {
 		construct(ctx, "202607241200", migrateClearUnknownAudioProperties),
 		construct(ctx, "202609091200", migrateAddAlbumCoverOverrides),
 		construct(ctx, "202609091300", migrateAddCollections),
+		construct(ctx, "202609171200", migrateCreditsArtistRoleIndexes),
+		construct(ctx, "202609241500", migrateTrackISRCUniquePerTrack),
+		construct(ctx, "202610081200", migrateClearNegativeAudioProperties),
+		construct(ctx, "202610221200", migrateAddAudioProperties),
 	}
 
 	return gormigrate.
@@ -1117,4 +1121,36 @@ func migrateAddAlbumCoverOverrides(tx *gorm.DB, _ MigrationContext) error {
 
 func migrateAddCollections(tx *gorm.DB, _ MigrationContext) error {
 	return tx.AutoMigrate(Collection{}, CollectionAlbum{}).Error
+}
+
+func migrateCreditsArtistRoleIndexes(tx *gorm.DB, _ MigrationContext) error {
+	// (artist_id, role) covers the roles subquery in getArtists, and makes the artist_id only indexes redundant
+	return tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_album_credits_artist_role ON "album_credits" (artist_id, role);
+		CREATE INDEX IF NOT EXISTS idx_track_credits_artist_role ON "track_credits" (artist_id, role);
+		DROP INDEX IF EXISTS idx_album_credits_artist_id;
+		DROP INDEX IF EXISTS idx_track_credits_artist_id;
+	`).Error
+}
+
+func migrateTrackISRCUniquePerTrack(tx *gorm.DB, _ MigrationContext) error {
+	// idx_isrc_track was unique on isrc alone, so the scanner silently dropped an ISRC shared by two tracks
+	return tx.Exec(`
+		DROP INDEX IF EXISTS idx_isrc_track;
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_isrc_track ON "track_isrcs" (isrc, track_id);
+	`).Error
+}
+
+func migrateClearNegativeAudioProperties(tx *gorm.DB, _ MigrationContext) error {
+	// taglib can return negatives other than -1, so clear anything in the uint32 wrapped negative range
+	return tx.Exec(`
+		UPDATE tracks SET bitrate=0 WHERE bitrate>=2147483648;
+		UPDATE tracks SET length=0 WHERE length>=2147483;
+		UPDATE podcast_episodes SET bitrate=0 WHERE bitrate>=2147483648;
+		UPDATE podcast_episodes SET length=0 WHERE length>=2147483;
+	`).Error
+}
+
+func migrateAddAudioProperties(tx *gorm.DB, _ MigrationContext) error {
+	return tx.AutoMigrate(Track{}, PodcastEpisode{}).Error
 }

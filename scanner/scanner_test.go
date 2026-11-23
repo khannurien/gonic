@@ -68,6 +68,32 @@ func TestWithExcludePattern(t *testing.T) {
 	assert.Equal(t, artists, 2)                                         // not all artists
 }
 
+func TestIgnoreMarker(t *testing.T) {
+	t.Parallel()
+	m := mockfs.New(t)
+
+	m.AddItems()
+	m.ScanAndClean()
+
+	os.WriteFile(filepath.Join(m.TmpDir(), "artist-1", ".gonicignore"), nil, 0o600)
+	os.WriteFile(filepath.Join(m.TmpDir(), "artist-0", "album-0", ".gonicignore"), nil, 0o600)
+	m.ScanAndClean()
+
+	var tracks int
+	assert.NoError(t, m.DB().Model(&db.Track{}).Count(&tracks).Error)
+	assert.Equal(t, 15, tracks)
+
+	var albums int
+	assert.NoError(t, m.DB().Model(&db.Album{}).Count(&albums).Error)
+	assert.Equal(t, 8, albums)
+
+	var artists int
+	assert.NoError(t, m.DB().Model(&db.Artist{}).Count(&artists).Error)
+	assert.Equal(t, 2, artists)
+
+	assert.Equal(t, gorm.ErrRecordNotFound, m.DB().Where("left_path=? AND right_path=?", "artist-1/", "album-0").Find(&db.Album{}).Error) // nested folder is ignored too
+}
+
 func TestParentID(t *testing.T) {
 	t.Parallel()
 	m := mockfs.New(t)
@@ -547,6 +573,20 @@ func TestISRCs(t *testing.T) {
 	// old ISRC missing
 	isISRCMissing("123456789A")
 	isISRCMissing("123456789B")
+}
+
+func TestISRCSharedByTracks(t *testing.T) {
+	t.Parallel()
+	m := mockfs.New(t)
+
+	m.AddItems()
+	m.SetTrack("artist-0/album-0/track-0.flac", func(tags *mockfs.TagInfo) { normtag.Set(tags.Tags, normtag.ISRC, "123456789A") })
+	m.SetTrack("artist-1/album-2/track-0.flac", func(tags *mockfs.TagInfo) { normtag.Set(tags.Tags, normtag.ISRC, "123456789A") })
+	m.ScanAndClean()
+
+	var count int
+	require.NoError(t, m.DB().Model(db.TrackISRC{}).Where("isrc=?", "123456789A").Count(&count).Error)
+	assert.Equal(t, 2, count)
 }
 
 func TestMultiFolders(t *testing.T) {
@@ -1211,13 +1251,11 @@ func TestPrefixOverlap(t *testing.T) {
 func TestReadDoubleDelim(t *testing.T) {
 	t.Parallel()
 
-	spec := &tags.Spec{Key: []string{"X"}}
+	spec := &tags.Spec{Sources: []tags.Source{{Key: "X"}}}
 	trags := tags.Tags{"X": {`DON'T//BE//⚜⚜⚜`}}
-	settings := map[*tags.Spec]tags.MultiValueSetting{
-		spec: {Mode: tags.Delim, Delim: `/`},
-	}
+	setting := tags.MultiValueSetting{Mode: tags.Delim, Delim: `/`}
 
-	values := tags.ReadValues(trags, spec, settings)
+	values := tags.ReadValues(trags, spec, setting)
 	require.Equal(t, []string{`DON'T`, ``, `BE`, ``, `⚜⚜⚜`}, values)
 }
 

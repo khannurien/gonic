@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -38,6 +39,26 @@ func New(path string, opts url.Values, logQueries bool) (*DB, error) {
 	if logQueries {
 		db.LogMode(true)
 	}
+
+	// gorm binds a variable per parent row when preloading, so big lists hit SQLite's limit. preload in chunks instead
+	// TODO: remove once we're off gorm v1's preloading, eg. for batched loading, gorm v2, or no gorm at all
+	const chunkSize = 5000
+	preload := db.Callback().Query().Get("gorm:preload")
+	db.Callback().Query().Replace("gorm:preload", func(scope *gorm.Scope) {
+		rows := scope.IndirectValue()
+		if rows.Kind() != reflect.Slice || rows.Len() <= chunkSize {
+			preload(scope)
+			return
+		}
+		all := scope.Value
+		defer func() { scope.Value = all }()
+		for i := 0; i < rows.Len() && !scope.HasError(); i += chunkSize {
+			chunk := reflect.New(rows.Type())
+			chunk.Elem().Set(rows.Slice(i, min(i+chunkSize, rows.Len())))
+			scope.Value = chunk.Interface()
+			preload(scope)
+		}
+	})
 
 	db.DB().SetMaxOpenConns(4)
 
@@ -171,9 +192,10 @@ func (db *DB) TransactionChunked(data []int64, cb func(*DB, []int64) error) erro
 type SettingKey string
 
 const (
-	LastFMAPIKey SettingKey = "lastfm_api_key" //nolint:gosec
-	LastFMSecret SettingKey = "lastfm_secret"
-	LastScanTime SettingKey = "last_scan_time"
+	LastFMAPIKey   SettingKey = "lastfm_api_key" //nolint:gosec
+	LastFMSecret   SettingKey = "lastfm_secret"
+	LastFMLanguage SettingKey = "lastfm_language"
+	LastScanTime   SettingKey = "last_scan_time"
 )
 
 func (db *DB) GetSetting(key SettingKey) (string, error) {
@@ -187,7 +209,7 @@ func (db *DB) GetSetting(key SettingKey) (string, error) {
 func (db *DB) SetSetting(key SettingKey, value string) error {
 	return db.
 		Where("key=?", key).
-		Assign(Setting{Key: key, Value: value}).
+		Assign(map[string]any{"key": key, "value": value}).
 		FirstOrCreate(&Setting{}).
 		Error
 }
@@ -221,11 +243,18 @@ type Genre struct {
 // AudioFile is used to avoid some duplication in handlers_raw.go
 // between Track and Podcast
 type AudioFile interface {
+	SID() *specid.ID
 	Ext() string
 	MIME() string
+	AbsPath() string
 	AudioFilename() string
 	AudioBitrate() int
 	AudioLength() int
+	AudioCodec() string
+	AudioContainer() string
+	AudioChannels() int
+	AudioSampleRate() int
+	AudioBitDepth() int
 }
 
 type Track struct {
@@ -242,6 +271,11 @@ type Track struct {
 	Size                 int            `sql:"default: null"`
 	Length               int            `sql:"default: null"`
 	Bitrate              int            `sql:"default: null"`
+	Channels             int            `sql:"default: null"`
+	SampleRate           int            `sql:"default: null"`
+	BitDepth             int            `sql:"default: null"`
+	Codec                string         `sql:"default: null"`
+	Container            string         `sql:"default: null"`
 	TagTitle             string         `sql:"default: null"`
 	TagTitleUDec         string         `sql:"default: null"`
 	TagTrackArtist       string         `sql:"default: null"`
@@ -266,8 +300,13 @@ type Track struct {
 	Play        *TrackPlay
 }
 
-func (t *Track) AudioLength() int  { return t.Length }
-func (t *Track) AudioBitrate() int { return t.Bitrate }
+func (t *Track) AudioLength() int       { return t.Length }
+func (t *Track) AudioBitrate() int      { return t.Bitrate }
+func (t *Track) AudioCodec() string     { return t.Codec }
+func (t *Track) AudioContainer() string { return t.Container }
+func (t *Track) AudioChannels() int     { return t.Channels }
+func (t *Track) AudioSampleRate() int   { return t.SampleRate }
+func (t *Track) AudioBitDepth() int     { return t.BitDepth }
 
 func (t *Track) SID() *specid.ID {
 	return &specid.ID{Type: specid.Track, Value: t.ID}
@@ -507,16 +546,16 @@ type TranscodeFormatPreference struct {
 
 type AlbumCredit struct {
 	AlbumID    int    `gorm:"not null; unique_index:idx_album_credit" sql:"default: null; type:int REFERENCES albums(id) ON DELETE CASCADE"`
-	ArtistID   int    `gorm:"not null; unique_index:idx_album_credit; index:idx_album_credits_artist_id" sql:"default: null; type:int REFERENCES artists(id) ON DELETE CASCADE"`
-	Role       string `gorm:"not null; unique_index:idx_album_credit" sql:"default: null"`
+	ArtistID   int    `gorm:"not null; unique_index:idx_album_credit; index:idx_album_credits_artist_role" sql:"default: null; type:int REFERENCES artists(id) ON DELETE CASCADE"`
+	Role       string `gorm:"not null; unique_index:idx_album_credit; index:idx_album_credits_artist_role" sql:"default: null"`
 	CreditedAs string `sql:"default: null"`
 	Artist     *Artist
 }
 
 type TrackCredit struct {
 	TrackID    int    `gorm:"not null; unique_index:idx_track_credit" sql:"default: null; type:int REFERENCES tracks(id) ON DELETE CASCADE"`
-	ArtistID   int    `gorm:"not null; unique_index:idx_track_credit; index:idx_track_credits_artist_id" sql:"default: null; type:int REFERENCES artists(id) ON DELETE CASCADE"`
-	Role       string `gorm:"not null; unique_index:idx_track_credit" sql:"default: null"`
+	ArtistID   int    `gorm:"not null; unique_index:idx_track_credit; index:idx_track_credits_artist_role" sql:"default: null; type:int REFERENCES artists(id) ON DELETE CASCADE"`
+	Role       string `gorm:"not null; unique_index:idx_track_credit; index:idx_track_credits_artist_role" sql:"default: null"`
 	CreditedAs string `sql:"default: null"`
 	Artist     *Artist
 }
@@ -540,7 +579,7 @@ type TrackGenre struct {
 
 type TrackISRC struct {
 	ISRC    string `gorm:"not null; unique_index:idx_isrc_track" sql:"default: null;"`
-	TrackID int    `gorm:"not null unique_index:idx_isrc_track" sql:"default: null; type:int REFERENCES tracks(id) ON DELETE CASCADE"`
+	TrackID int    `gorm:"not null; unique_index:idx_isrc_track" sql:"default: null; type:int REFERENCES tracks(id) ON DELETE CASCADE"`
 }
 
 type AlbumLabel struct {
@@ -646,6 +685,11 @@ type PodcastEpisode struct {
 	AudioURL    string
 	Bitrate     int
 	Length      int
+	Channels    int    `sql:"default: null"`
+	SampleRate  int    `sql:"default: null"`
+	BitDepth    int    `sql:"default: null"`
+	Codec       string `sql:"default: null"`
+	Container   string `sql:"default: null"`
 	Size        int
 	Filename    string
 	Status      PodcastEpisodeStatus
@@ -655,8 +699,13 @@ type PodcastEpisode struct {
 	Album       string
 }
 
-func (pe *PodcastEpisode) AudioLength() int  { return pe.Length }
-func (pe *PodcastEpisode) AudioBitrate() int { return pe.Bitrate }
+func (pe *PodcastEpisode) AudioLength() int       { return pe.Length }
+func (pe *PodcastEpisode) AudioBitrate() int      { return pe.Bitrate }
+func (pe *PodcastEpisode) AudioCodec() string     { return pe.Codec }
+func (pe *PodcastEpisode) AudioContainer() string { return pe.Container }
+func (pe *PodcastEpisode) AudioChannels() int     { return pe.Channels }
+func (pe *PodcastEpisode) AudioSampleRate() int   { return pe.SampleRate }
+func (pe *PodcastEpisode) AudioBitDepth() int     { return pe.BitDepth }
 
 func (pe *PodcastEpisode) SID() *specid.ID {
 	return &specid.ID{Type: specid.PodcastEpisode, Value: pe.ID}

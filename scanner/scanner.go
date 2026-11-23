@@ -34,6 +34,9 @@ var (
 	ErrReadingTags     = errors.New("could not read tags")
 )
 
+// ignoreMarker excludes the directory where it is placed and all subdirectories from scanning
+const ignoreMarker = ".gonicignore"
+
 type Scanner struct {
 	db                 *db.DB
 	musicDirs          []string
@@ -247,6 +250,10 @@ func watchCallback(watcher *fsnotify.Watcher, absPath string, d fs.DirEntry, err
 		return nil
 	}
 
+	if hasIgnoreMarker(absPath) {
+		return fs.SkipDir
+	}
+
 	if err := watcher.Add(absPath); err != nil {
 		return fmt.Errorf("add path to watcher: %w", err)
 	}
@@ -267,6 +274,11 @@ func (s *Scanner) scanCallback(st *State, absPath string, d fs.DirEntry, err err
 		})
 	default:
 		return nil
+	}
+
+	if hasIgnoreMarker(absPath) {
+		log.Printf("ignoring folder %q, found %s", absPath, ignoreMarker)
+		return fs.SkipDir
 	}
 
 	if s.excludePattern != nil && s.excludePattern.MatchString(absPath) {
@@ -429,7 +441,7 @@ func (s *Scanner) scanDir(st *State, absPath string) error {
 
 //nolint:gocyclo
 func (s *Scanner) populateTrackAndArtists(tx *db.DB, st *State, i int, album *db.Album, track *db.Track, timeSpec times.Timespec, trprops tags.Properties, trags tags.Tags, basename, absPath string) error {
-	genreNames := tags.ReadValues(trags, tags.Genre, s.multiValueSettings)
+	genreNames := tags.ReadValues(trags, tags.Genre, s.multiValueSettings[tags.Genre])
 	genreIDs, err := populateGenres(tx, genreNames)
 	if err != nil {
 		return fmt.Errorf("populate genres: %w", err)
@@ -464,12 +476,12 @@ func (s *Scanner) populateTrackAndArtists(tx *db.DB, st *State, i int, album *db
 		createTime = timeSpec.BirthTime()
 	}
 
-	albumArtistEntries := tags.ReadCredits(trags, tags.AlbumArtist, s.multiValueSettings)
-	trackArtistEntries := tags.ReadCredits(trags, tags.Artist, s.multiValueSettings)
+	albumArtistEntries := tags.ReadCredits(trags, tags.AlbumArtist, s.multiValueSettings[tags.AlbumArtist])
+	trackArtistEntries := tags.ReadCredits(trags, tags.Artist, s.multiValueSettings[tags.Artist])
 
 	contributorEntries := make([][]tags.Credited, 0, len(trackContributorRoles))
 	for _, r := range trackContributorRoles {
-		contributorEntries = append(contributorEntries, tags.ReadCredits(trags, r.spec, nil))
+		contributorEntries = append(contributorEntries, tags.ReadCredits(trags, r.spec, tags.MultiValueSetting{Mode: tags.Multi}))
 	}
 
 	// if the same artist name appears with an MBID anywhere in this track's tags, prefer that MBID for the same name on credits where the
@@ -530,7 +542,7 @@ func (s *Scanner) populateTrackAndArtists(tx *db.DB, st *State, i int, album *db
 		return fmt.Errorf("populate track genres: %w", err)
 	}
 
-	isrcs := tags.ReadValues(trags, tags.ISRC, s.multiValueSettings)
+	isrcs := tags.ReadValues(trags, tags.ISRC, s.multiValueSettings[tags.ISRC])
 	if err := populateTrackISRCs(tx, track, isrcs); err != nil {
 		return fmt.Errorf("populate track ISRCs: %w", err)
 	}
@@ -682,9 +694,14 @@ func populateTrack(tx *db.DB, scanEmbeddedCover bool, album *db.Album, track *db
 		track.HasEmbeddedCover = trprops.HasCover
 	}
 
-	// these two are calculated from the file instead of tags
+	// these are calculated from the file instead of tags
 	track.Length = int(trprops.Length.Seconds())
 	track.Bitrate = int(trprops.Bitrate)
+	track.Channels = int(trprops.Channels)
+	track.SampleRate = int(trprops.SampleRate)
+	track.BitDepth = int(trprops.BitDepth)
+	track.Codec = trprops.Codec
+	track.Container = trprops.Container
 
 	if err := tx.Save(track).Error; err != nil {
 		return fmt.Errorf("saving track: %w", err)
@@ -1143,6 +1160,11 @@ func musicDirRelative(musicDirs []string, absPath string) (musicDir, relPath str
 		}
 	}
 	return
+}
+
+func hasIgnoreMarker(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, ignoreMarker))
+	return err == nil
 }
 
 func symWalk(absPath string, fn fs.WalkDirFunc) error {

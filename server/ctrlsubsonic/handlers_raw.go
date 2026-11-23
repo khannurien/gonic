@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/disintegration/imaging"
+	"github.com/djherbis/times"
 	"github.com/jinzhu/gorm"
 	"go.senan.xyz/wrtag/coverparse"
 
@@ -92,6 +93,23 @@ func (c *Controller) ServeGetCoverArt(w http.ResponseWriter, r *http.Request) *s
 		}
 	}
 
+	sourcePath, openCover, err := coverFor(c.dbc, c.artistInfoCache, c.playlistStore, c.coverStore, c.tagReader, id)
+	if err != nil {
+		return spec.NewError(70, "couldn't find cover %q: %v", id, err)
+	}
+
+	var sourceChanged time.Time
+	if sourcePath != "" {
+		ts, err := times.Stat(sourcePath)
+		if err != nil {
+			return spec.NewError(70, "couldn't find cover %q: %v", id, err)
+		}
+		sourceChanged = ts.ModTime()
+		if ts.HasChangeTime() && ts.ChangeTime().After(sourceChanged) {
+			sourceChanged = ts.ChangeTime()
+		}
+	}
+
 	c.coverCache.RLock()
 	defer c.coverCache.RUnlock()
 
@@ -108,12 +126,15 @@ func (c *Controller) ServeGetCoverArt(w http.ResponseWriter, r *http.Request) *s
 	}
 
 	if cachePath != "" {
-		_ = os.Chtimes(cachePath, time.Now(), time.Now()) // touch for LRU eviction
-		serve(cachePath)
-		return nil
+		if isCachedCoverFresh(cachePath, sourceChanged) {
+			_ = os.Chtimes(cachePath, time.Now(), time.Now()) // touch for LRU eviction
+			serve(cachePath)
+			return nil
+		}
+		_ = os.Remove(cachePath) //nolint:gosec // cachePath is contained to the cover cache dir via fileutil.SafeJoin
 	}
 
-	reader, err := coverFor(c.dbc, c.artistInfoCache, c.playlistStore, c.coverStore, c.tagReader, id)
+	reader, err := openCover()
 	if err != nil {
 		return spec.NewError(70, "couldn't find cover %q: %v", id, err)
 	}
@@ -134,7 +155,7 @@ func (c *Controller) ServeGetCoverArt(w http.ResponseWriter, r *http.Request) *s
 
 	if minSize != size {
 		// we down sized, check cache again
-		if _, err := os.Stat(cachePath); err == nil {
+		if isCachedCoverFresh(cachePath, sourceChanged) {
 			_ = os.Chtimes(cachePath, time.Now(), time.Now()) // touch for LRU eviction
 			serve(cachePath)
 			return nil
@@ -168,50 +189,60 @@ func findCachedCover(cacheDir, idStr string, size int) (string, error) {
 	return "", os.ErrNotExist
 }
 
+func isCachedCoverFresh(cachePath string, sourceChanged time.Time) bool {
+	info, err := os.Stat(cachePath) //nolint:gosec // cachePath is contained to the cover cache dir via fileutil.SafeJoin
+	return err == nil && !info.ModTime().Before(sourceChanged)
+}
+
 var (
 	errCoverNotFound = errors.New("could not find a cover with that id")
 	errCoverEmpty    = errors.New("no cover found")
 )
 
 // TODO: can we use specidpaths.Locate here?
-func coverFor(dbc *db.DB, artistInfoCache *artistinfocache.ArtistInfoCache, playlistStore *playlist.Store, coverStore *covers.Store, tagReader tags.Reader, id specid.ID) (io.ReadCloser, error) {
+func coverFor(dbc *db.DB, artistInfoCache *artistinfocache.ArtistInfoCache, playlistStore *playlist.Store, coverStore *covers.Store, tagReader tags.Reader, id specid.ID) (string, func() (io.ReadCloser, error), error) {
+	var path string
+	var err error
 	switch id.Type {
-	case specid.Album:
-		return coverForAlbum(dbc, coverStore, id.Value)
 	case specid.Artist:
-		return coverForArtist(artistInfoCache, id.Value)
-	case specid.Podcast:
-		return coverForPodcast(dbc, id.Value)
-	case specid.PodcastEpisode:
-		return coverForPodcastEpisode(dbc, id.Value)
+		return "", func() (io.ReadCloser, error) { return coverForArtist(artistInfoCache, id.Value) }, nil
 	case specid.Track:
-		return coverForTrack(dbc, tagReader, id.Value)
+		path, err = coverPathForTrack(dbc, id.Value)
+		return path, func() (io.ReadCloser, error) { return coverForTrack(tagReader, path) }, err
+	case specid.Album:
+		path, err = coverPathForAlbum(dbc, coverStore, id.Value)
+	case specid.Podcast:
+		path, err = coverPathForPodcast(dbc, id.Value)
+	case specid.PodcastEpisode:
+		path, err = coverPathForPodcastEpisode(dbc, id.Value)
 	case specid.Playlist:
-		return coverForPlaylist(playlistStore, id)
+		path, err = coverPathForPlaylist(playlistStore, id)
 	case specid.Collection:
-		return coverForCollection(dbc, coverStore, tagReader, id.Value)
+		// a mosaic has no single source file, so freshness relies on the explicit purges
+		return "", func() (io.ReadCloser, error) { return coverForCollection(dbc, coverStore, tagReader, id.Value) }, nil
 	default:
-		return nil, errCoverNotFound
+		return "", nil, errCoverNotFound
 	}
+	return path, func() (io.ReadCloser, error) { return os.Open(path) }, err //nolint:gosec // path is from db, populated by scanner, or validated via SafeJoin
 }
 
-func coverForAlbum(dbc *db.DB, coverStore *covers.Store, id int) (*os.File, error) {
+func coverPathForAlbum(dbc *db.DB, coverStore *covers.Store, id int) (string, error) {
 	var folder db.Album
 	err := dbc.DB.
 		Select("id, root_dir, left_path, right_path, cover, cover_override_hash, cover_override_ext").
 		First(&folder, id).
 		Error
 	if err != nil {
-		return nil, fmt.Errorf("select album: %w", err)
+		return "", fmt.Errorf("select album: %w", err)
 	}
 	// an admin set this from a client. it lives in gonic's covers dir, not the music tree
 	if folder.CoverOverrideHash != "" && coverStore != nil {
-		return coverStore.Open(folder.CoverOverrideHash, folder.CoverOverrideExt)
+		return coverStore.Path(folder.CoverOverrideHash, folder.CoverOverrideExt)
 	}
 	if folder.Cover == "" {
-		return nil, errCoverEmpty
+		return "", errCoverEmpty
 	}
-	return os.Open(filepath.Join(folder.RootDir, folder.LeftPath, folder.RightPath, folder.Cover))
+	return filepath.Join(folder.RootDir, folder.LeftPath, folder.RightPath, folder.Cover), nil
 }
 
 func coverForArtist(artistInfoCache *artistinfocache.ArtistInfoCache, id int) (io.ReadCloser, error) {
@@ -233,47 +264,48 @@ func coverForArtist(artistInfoCache *artistinfocache.ArtistInfoCache, id int) (i
 	return resp.Body, nil
 }
 
-func coverForPodcast(dbc *db.DB, id int) (*os.File, error) {
+func coverPathForPodcast(dbc *db.DB, id int) (string, error) {
 	var podcast db.Podcast
 	err := dbc.
 		First(&podcast, id).
 		Error
 	if err != nil {
-		return nil, fmt.Errorf("select podcast: %w", err)
+		return "", fmt.Errorf("select podcast: %w", err)
 	}
 	if podcast.Image == "" {
-		return nil, errCoverEmpty
+		return "", errCoverEmpty
 	}
-	return os.Open(filepath.Join(podcast.RootDir, podcast.Image))
+	return filepath.Join(podcast.RootDir, podcast.Image), nil
 }
 
-func coverForPodcastEpisode(dbc *db.DB, id int) (*os.File, error) {
+func coverPathForPodcastEpisode(dbc *db.DB, id int) (string, error) {
 	var pe db.PodcastEpisode
 	err := dbc.
 		Preload("Podcast").
 		First(&pe, id).
 		Error
 	if err != nil {
-		return nil, fmt.Errorf("select episode: %w", err)
+		return "", fmt.Errorf("select episode: %w", err)
 	}
 	if pe.Podcast == nil || pe.Podcast.Image == "" {
-		return nil, errCoverEmpty
+		return "", errCoverEmpty
 	}
-	return os.Open(filepath.Join(pe.Podcast.RootDir, pe.Podcast.Image))
+	return filepath.Join(pe.Podcast.RootDir, pe.Podcast.Image), nil
 }
 
-func coverForTrack(dbc *db.DB, tagReader tags.Reader, id int) (io.ReadCloser, error) {
+func coverPathForTrack(dbc *db.DB, id int) (string, error) {
 	var tr db.Track
 	err := dbc.
 		Preload("Album").
 		First(&tr, id).
 		Error
 	if err != nil {
-		return nil, fmt.Errorf("select track: %w", err)
+		return "", fmt.Errorf("select track: %w", err)
 	}
+	return tr.AbsPath(), nil
+}
 
-	absPath := tr.AbsPath()
-
+func coverForTrack(tagReader tags.Reader, absPath string) (io.ReadCloser, error) {
 	cover, err := tagReader.ReadCover(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("read cover: %w", err)
@@ -285,17 +317,17 @@ func coverForTrack(dbc *db.DB, tagReader tags.Reader, id int) (io.ReadCloser, er
 	return io.NopCloser(bytes.NewReader(cover)), nil
 }
 
-func coverForPlaylist(playlistStore *playlist.Store, id specid.ID) (*os.File, error) {
+func coverPathForPlaylist(playlistStore *playlist.Store, id specid.ID) (string, error) {
 	playlistPath := playlistIDDecode(id)
 	playlistDir, err := fileutil.SafeJoin(playlistStore.BasePath(), filepath.Dir(playlistPath))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	playlistBase := strings.TrimSuffix(filepath.Base(playlistPath), filepath.Ext(playlistPath))
 
 	entries, err := os.ReadDir(playlistDir)
 	if err != nil {
-		return nil, fmt.Errorf("read playlist dir: %w", err)
+		return "", fmt.Errorf("read playlist dir: %w", err)
 	}
 
 	var cover string
@@ -311,10 +343,10 @@ func coverForPlaylist(playlistStore *playlist.Store, id specid.ID) (*os.File, er
 	}
 
 	if cover == "" {
-		return nil, errCoverEmpty
+		return "", errCoverEmpty
 	}
 
-	return os.Open(filepath.Join(playlistDir, cover)) //nolint:gosec // playlistDir validated via SafeJoin above
+	return filepath.Join(playlistDir, cover), nil
 }
 
 func (c *Controller) ServeStream(w http.ResponseWriter, r *http.Request) *spec.Response {
@@ -341,24 +373,26 @@ func (c *Controller) ServeStream(w http.ResponseWriter, r *http.Request) *spec.R
 	timeOffset, _ := params.GetInt("timeOffset")
 	estimateLength := params.GetOrBool("estimateContentLength", false)
 
+	client, _ := params.Get("c")
+
 	if format == "raw" || urlPath == "/download" {
+		log.Printf("serving raw file %q for user %q client %q", audioFile.AudioFilename(), user.Name, client)
 		http.ServeFile(w, r, file.AbsPath()) //nolint:gosec // path is from db, populated by scanner
 		return nil
 	}
 
 	if maxBitRate >= audioFile.AudioBitrate() {
-		log.Printf("serving raw file, requested max bitrate %d is greater or equal to %d", maxBitRate, audioFile.AudioBitrate())
+		log.Printf("serving raw file %q for user %q client %q, requested max bitrate %d is greater or equal to %d", audioFile.AudioFilename(), user.Name, client, maxBitRate, audioFile.AudioBitrate())
 		http.ServeFile(w, r, file.AbsPath()) //nolint:gosec // path is from db, populated by scanner
 		return nil
 	}
 
-	client, _ := params.Get("c")
 	profile, clientChose, ok, err := streamBaseProfile(c.dbc, user.ID, client, format, maxBitRate)
 	if err != nil {
 		return spec.NewError(0, "couldn't pick profile: %v", err)
 	}
 	if !ok {
-		log.Printf("serving raw file, no matching profile for user %q client %q format %q", user.Name, client, format)
+		log.Printf("serving raw file %q for user %q client %q, no matching profile for format %q", audioFile.AudioFilename(), user.Name, client, format)
 		http.ServeFile(w, r, file.AbsPath()) //nolint:gosec // path is from db, populated by scanner
 		return nil
 	}
@@ -380,13 +414,13 @@ func (c *Controller) ServeStream(w http.ResponseWriter, r *http.Request) *spec.R
 		}
 		if path != "" {
 			defer release()
-			log.Printf("serving cached transcode at %q with bitrate %d", profile.MIME(), profile.BitRate())
-			http.ServeFile(w, r, path)
+			log.Printf("serving cached transcode of %q to %q at bitrate %d for user %q client %q", audioFile.AudioFilename(), profile.MIME(), profile.BitRate(), user.Name, client)
+			http.ServeFile(w, r, path) //nolint:gosec // path is a cache filename derived from an md5 key
 			return nil
 		}
 	}
 
-	log.Printf("transcoding to %q at bitrate %d", profile.MIME(), profile.BitRate())
+	log.Printf("transcoding %q to %q at bitrate %d for user %q client %q", audioFile.AudioFilename(), profile.MIME(), profile.BitRate(), user.Name, client)
 
 	var out io.Writer = w
 	if estimateLength {
@@ -438,20 +472,14 @@ func (c *Controller) ServeGetAvatar(w http.ResponseWriter, r *http.Request) *spe
 var defaultFormat = transcode.Opus
 
 func streamBaseProfile(dbc *db.DB, userID int, client string, format string, maxBitRate int) (transcode.Profile, bool, bool, error) {
-	pref, err := streamGetTranscodePreference(dbc, userID, client)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return transcode.Profile{}, false, false, fmt.Errorf("check db: %w", err)
+	prefName, prefProfile, err := streamGetTranscodePreference(dbc, userID, client)
+	if err != nil {
+		return transcode.Profile{}, false, false, err
 	}
 
 	// per-client override wins if it matches the client's format (or no format was requested)
-	if pref != nil {
-		p, found := transcode.UserProfiles[pref.Profile]
-		if !found {
-			return transcode.Profile{}, false, false, fmt.Errorf("unknown transcode user profile %q", pref.Profile)
-		}
-		if format == "" || p.Suffix() == format {
-			return p, false, true, nil
-		}
+	if prefName != "" && (format == "" || prefProfile.Suffix() == format) {
+		return prefProfile, false, true, nil
 	}
 
 	// user configured format defaults. only consulted when the client requested a specific format
@@ -486,7 +514,7 @@ func streamBaseProfile(dbc *db.DB, userID int, client string, format string, max
 	return transcode.Profile{}, false, false, nil
 }
 
-func streamGetTranscodePreference(dbc *db.DB, userID int, client string) (*db.TranscodePreference, error) {
+func streamGetTranscodePreference(dbc *db.DB, userID int, client string) (string, transcode.Profile, error) {
 	var pref db.TranscodePreference
 	err := dbc.
 		Where("user_id=?", userID).
@@ -495,21 +523,21 @@ func streamGetTranscodePreference(dbc *db.DB, userID int, client string) (*db.Tr
 		First(&pref).
 		Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
+		return "", transcode.Profile{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("find transcode preference: %w", err)
-	}
-	return &pref, nil
-}
-
-func streamGetTranscodeMeta(dbc *db.DB, userID int, client string) spec.TranscodeMeta {
-	pref, _ := streamGetTranscodePreference(dbc, userID, client)
-	if pref == nil {
-		return spec.TranscodeMeta{}
+		return "", transcode.Profile{}, fmt.Errorf("find transcode preference: %w", err)
 	}
 	profile, ok := transcode.UserProfiles[pref.Profile]
 	if !ok {
+		return "", transcode.Profile{}, fmt.Errorf("unknown transcode user profile %q", pref.Profile)
+	}
+	return pref.Profile, profile, nil
+}
+
+func streamGetTranscodeMeta(dbc *db.DB, userID int, client string) spec.TranscodeMeta {
+	prefName, profile, err := streamGetTranscodePreference(dbc, userID, client)
+	if err != nil || prefName == "" {
 		return spec.TranscodeMeta{}
 	}
 	return spec.TranscodeMeta{

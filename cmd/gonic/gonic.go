@@ -85,6 +85,7 @@ func main() {
 	confScanAtStart := flag.Bool("scan-at-start-enabled", false, "whether to perform an initial scan at startup (optional)")
 	confScanWatcher := flag.Bool("scan-watcher-enabled", false, "whether to watch file system for new music and rescan (optional)")
 	confScanEmbeddedCover := flag.Bool("scan-embedded-cover-enabled", true, "whether to scan for embedded covers in audio files (optional)")
+	confScanNonAdmin := flag.Bool("scan-non-admin-enabled", false, "whether non-admin users can start a scan (optional)")
 
 	confJukeboxEnabled := flag.Bool("jukebox-enabled", false, "whether the subsonic jukebox api should be enabled (optional)")
 	confJukeboxMPVExtraArgs := flag.String("jukebox-mpv-extra-args", "", "extra command line arguments to pass to the jukebox mpv daemon (optional)")
@@ -260,17 +261,18 @@ func main() {
 	transcodeCache := cache.New(cacheDirAudio, *confTranscodeCacheSize)
 	transcoder := transcode.NewCachingTranscoder(transcode.NewFFmpegTranscoder(), transcodeCache)
 
-	lastfmClientKeySecretFunc := func() (string, string, error) {
+	lastfmClientSettingsFunc := func() (string, string, string, error) {
 		apiKey, _ := dbc.GetSetting(db.LastFMAPIKey)
 		secret, _ := dbc.GetSetting(db.LastFMSecret)
+		language, _ := dbc.GetSetting(db.LastFMLanguage)
 		if apiKey == "" || secret == "" {
-			return "", "", fmt.Errorf("not configured")
+			return "", "", "", fmt.Errorf("not configured")
 		}
-		return apiKey, secret, nil
+		return apiKey, secret, language, nil
 	}
 
 	listenbrainzClient := listenbrainz.NewClient(userAgent)
-	lastfmClient := lastfm.NewClient(userAgent, lastfmClientKeySecretFunc)
+	lastfmClient := lastfm.NewClient(userAgent, lastfmClientSettingsFunc)
 	mbClient := musicbrainz.NewClient(userAgent)
 
 	coverSearcher := &coversearch.Searcher{
@@ -333,7 +335,7 @@ func main() {
 			log.Printf("error purging collection covers after scan: %v", err)
 		}
 	}
-	ctrlSubsonic, err := ctrlsubsonic.New(dbc, scannr, musicPaths, *confPodcastPath, cacheDirAudio, coverCache, jukebx, playlistStore, coverStore, coverSearcher, scrobblers, podcast, transcoder, lastfmClient, artistInfoCache, albumInfoCache, tagReader, resolveProxyPath)
+	ctrlSubsonic, err := ctrlsubsonic.New(dbc, scannr, *confScanNonAdmin, musicPaths, *confPodcastPath, cacheDirAudio, coverCache, jukebx, playlistStore, coverStore, coverSearcher, scrobblers, podcast, transcoder, lastfmClient, artistInfoCache, albumInfoCache, tagReader, resolveProxyPath)
 	if err != nil {
 		log.Panicf("error creating subsonic controller: %v\n", err)
 	}
@@ -537,7 +539,7 @@ func main() {
 	})
 
 	errgrp.Go(func() error {
-		if _, _, err := lastfmClientKeySecretFunc(); err != nil {
+		if _, _, _, err := lastfmClientSettingsFunc(); err != nil {
 			return nil
 		}
 

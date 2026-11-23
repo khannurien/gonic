@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -105,7 +106,9 @@ func TestCoverArtUploadOverridesAndClears(t *testing.T) {
 	require.NotEqual(t, before.Token, after.Token, "token must change so clients refetch")
 
 	// the bytes are served back through the normal cover path
-	body, err := coverForAlbum(f.dbc, f.contr.coverStore, f.albumAA.ID)
+	coverPath, err := coverPathForAlbum(f.dbc, f.contr.coverStore, f.albumAA.ID)
+	require.NoError(t, err)
+	body, err := os.Open(coverPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { body.Close() })
 	cfg, format, err := image.DecodeConfig(body)

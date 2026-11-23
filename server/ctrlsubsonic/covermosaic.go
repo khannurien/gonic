@@ -65,7 +65,7 @@ func coverForCollection(dbc *db.DB, coverStore *covers.Store, tagReader tags.Rea
 	return encodeJPEG(composeMosaic(images))
 }
 
-// albumCoverImage resolves one album's art the same way coverForAlbum does, but also falls
+// albumCoverImage resolves one album's art the same way coverPathForAlbum does, but also falls
 // back to a track's embedded cover. the mosaic is ours rather than spec mandated, so it may
 // as well work for embedded-only libraries.
 func albumCoverImage(dbc *db.DB, coverStore *covers.Store, tagReader tags.Reader, albumID int) (image.Image, error) {
@@ -84,7 +84,10 @@ func albumCoverImage(dbc *db.DB, coverStore *covers.Store, tagReader tags.Reader
 	case album.Cover != "":
 		body, err = os.Open(filepath.Join(album.RootDir, album.LeftPath, album.RightPath, album.Cover))
 	case album.EmbeddedCoverTrackID != nil:
-		body, err = coverForTrack(dbc, tagReader, *album.EmbeddedCoverTrackID)
+		var trackPath string
+		if trackPath, err = coverPathForTrack(dbc, *album.EmbeddedCoverTrackID); err == nil {
+			body, err = coverForTrack(tagReader, trackPath)
+		}
 	default:
 		return nil, errCoverEmpty
 	}

@@ -258,7 +258,7 @@ func (c *Controller) coverFromTrack(album *db.Album, trackID specid.ID) (covers.
 	if track.AlbumID != album.ID {
 		return covers.Cover{}, errors.New("track does not belong to that album")
 	}
-	body, err := coverForTrack(c.dbc, c.tagReader, trackID.Value)
+	body, err := coverForTrack(c.tagReader, track.AbsPath())
 	if err != nil {
 		return covers.Cover{}, fmt.Errorf("read cover from track: %w", err)
 	}

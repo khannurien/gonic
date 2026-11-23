@@ -58,6 +58,7 @@ type Controller struct {
 
 	dbc            *db.DB
 	scanner        *scanner.Scanner
+	scanNonAdmin   bool
 	musicPaths     []MusicPath
 	podcastsPath   string
 	cacheAudioPath string
@@ -79,12 +80,13 @@ type Controller struct {
 	resolveProxyPath ProxyPathResolver
 }
 
-func New(dbc *db.DB, scannr *scanner.Scanner, musicPaths []MusicPath, podcastsPath string, cacheAudioPath string, coverCache *cache.DirCache, jukebox *jukebox.Jukebox, playlistStore *playlist.Store, coverStore *covers.Store, coverSearcher *coversearch.Searcher, scrobblers []scrobble.Scrobbler, podcasts *podcast.Podcasts, transcoder transcode.Transcoder, lastFMClient *lastfm.Client, artistInfoCache *artistinfocache.ArtistInfoCache, albumInfoCache *albuminfocache.AlbumInfoCache, tagReader tags.Reader, resolveProxyPath ProxyPathResolver) (*Controller, error) {
+func New(dbc *db.DB, scannr *scanner.Scanner, scanNonAdmin bool, musicPaths []MusicPath, podcastsPath string, cacheAudioPath string, coverCache *cache.DirCache, jukebox *jukebox.Jukebox, playlistStore *playlist.Store, coverStore *covers.Store, coverSearcher *coversearch.Searcher, scrobblers []scrobble.Scrobbler, podcasts *podcast.Podcasts, transcoder transcode.Transcoder, lastFMClient *lastfm.Client, artistInfoCache *artistinfocache.ArtistInfoCache, albumInfoCache *albuminfocache.AlbumInfoCache, tagReader tags.Reader, resolveProxyPath ProxyPathResolver) (*Controller, error) {
 	c := Controller{
 		ServeMux: http.NewServeMux(),
 
 		dbc:             dbc,
 		scanner:         scannr,
+		scanNonAdmin:    scanNonAdmin,
 		musicPaths:      musicPaths,
 		podcastsPath:    podcastsPath,
 		cacheAudioPath:  cacheAudioPath,
@@ -142,6 +144,7 @@ func New(dbc *db.DB, scannr *scanner.Scanner, musicPaths []MusicPath, podcastsPa
 	c.Handle("/getSimilarSongs2", chain(resp(c.ServeGetSimilarSongsTwo)))
 	c.Handle("/getLyrics", chain(resp(c.ServeGetLyrics)))
 	c.Handle("/getLyricsBySongId", chain(resp(c.ServeGetLyricsBySongID)))
+	c.Handle("/getTranscodeDecision", chain(resp(c.ServeGetTranscodeDecision)))
 	c.Handle("/getNowPlaying", chain(resp(c.ServeGetNowPlaying)))
 
 	// raw
@@ -165,6 +168,7 @@ func New(dbc *db.DB, scannr *scanner.Scanner, musicPaths []MusicPath, podcastsPa
 	c.Handle("/stream", chainRaw(respRaw(c.ServeStream)))
 	c.Handle("/download", chainRaw(respRaw(c.ServeStream)))
 	c.Handle("/getAvatar", chainRaw(respRaw(c.ServeGetAvatar)))
+	c.Handle("/getTranscodeStream", chainRaw(respRaw(c.ServeGetTranscodeStream)))
 
 	// browse by tag
 	c.Handle("/getAlbum", chain(resp(c.ServeGetAlbum)))
